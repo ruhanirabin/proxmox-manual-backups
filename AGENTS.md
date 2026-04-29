@@ -15,6 +15,14 @@ PVEXB is a Bash-based Proxmox USB backup runner. It preserves Home Assistant-tri
 - Update `README.md` when user-facing commands, files, install behavior, errors, or defaults change.
 - Scripts must read version from `../VERSION` in repo or `/usr/local/share/pvexb/VERSION` after install.
 
+## GitHub Sync
+
+- This repository is public on GitHub; keep `main` synchronized after completed version changes unless the user explicitly says not to push.
+- Before committing a version change, verify `VERSION`, `CHANGELOG.md`, and any required `README.md` updates are included.
+- Use clear commit messages that describe the user-facing change, for example `docs: add GitHub one-line install instructions`.
+- Run the validation commands below before committing.
+- After a successful commit, push the current branch to `origin`.
+
 ## Naming
 
 - Canonical prefix: `pvexb-`.

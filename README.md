@@ -64,18 +64,42 @@ The runner also falls back from `/etc/pvexb.conf` to `/etc/proxmox-usb-backup.co
 
 ## Install
 
-Run these commands on each Proxmox node:
+Run on each Proxmox host as `root`.
+
+Quick install from GitHub:
+
+```bash
+bash -c 'set -euo pipefail; tmp="$(mktemp -d)"; trap "rm -rf \"$tmp\"" EXIT; curl -fsSL https://github.com/ruhanirabin/proxmox-manual-backups/archive/refs/heads/main.tar.gz | tar -xz -C "$tmp" --strip-components=1; cd "$tmp"; ./install.sh'
+```
+
+The one-liner downloads this repository into a temporary directory, runs `install.sh`, and installs `pvexb-backup` plus compatibility wrappers under `/usr/local/bin`.
+
+If you already have a local checkout, run:
 
 ```bash
 chmod +x install.sh
 ./install.sh
 ```
 
-The installer prompts for Telegram `BOT_TOKEN` and `CHAT_ID` when run interactively. For non-interactive installs:
+The installer prompts for Telegram `BOT_TOKEN` and `CHAT_ID` when run interactively. You can pass parameters as environment variables before the command:
 
 ```bash
 BOT_TOKEN="123456789:token" CHAT_ID="123456789" ./install.sh
 ```
+
+One-line install with Telegram credentials:
+
+```bash
+BOT_TOKEN="123456789:token" CHAT_ID="123456789" bash -c 'set -euo pipefail; tmp="$(mktemp -d)"; trap "rm -rf \"$tmp\"" EXIT; curl -fsSL https://github.com/ruhanirabin/proxmox-manual-backups/archive/refs/heads/main.tar.gz | tar -xz -C "$tmp" --strip-components=1; cd "$tmp"; ./install.sh'
+```
+
+Available installer environment parameters:
+
+- `BOT_TOKEN` and `CHAT_ID` - write Telegram credentials to `/root/.pvexb.env`.
+- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` - legacy aliases for the same credentials.
+- `PVEXB_INSTALL_NONINTERACTIVE=true` - skip prompts and create the example Telegram env file if credentials are not supplied.
+- `PVEXB_DISABLE_SYSTEMD=false` - do not disable existing `pvexb-backup.service` or `pvexb-backup.timer` during install.
+- `PREFIX=/custom/bin`, `CONFIG_FILE=/custom/pvexb.conf`, `TELEGRAM_ENV_FILE=/custom/.pvexb.env`, and `LOG_DIR=/custom/log` - override install paths for advanced setups.
 
 Then review:
 

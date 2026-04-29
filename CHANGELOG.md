@@ -2,6 +2,14 @@
 
 All notable changes follow Semantic Versioning.
 
+## [0.7.6] - 2026-04-29
+
+- Added agent instructions for committing and syncing completed version changes to the public GitHub repository.
+
+## [0.7.5] - 2026-04-29
+
+- Added Proxmox host one-line GitHub install documentation with installer environment parameter examples.
+
 ## [0.7.4] - 2026-04-29
 
 - Added an optional Proxmox-in-Docker test harness under `tests/proxmox-docker/`.

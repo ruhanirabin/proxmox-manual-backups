@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+#
+# PVEXB Telegram notification helper
+# Version: read from ../VERSION in repo or /usr/local/share/pvexb/VERSION after install
+# Relative dependencies:
+# - ../VERSION
+# - ../config/pvexb.env.example
+# Installed dependencies:
+# - /root/.pvexb.env
+# - /usr/local/share/pvexb/VERSION
+
+set -o pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+REPO_VERSION_FILE="$SCRIPT_DIR/../VERSION"
+INSTALLED_VERSION_FILE="/usr/local/share/pvexb/VERSION"
+
+read_version() {
+  if [ -f "$REPO_VERSION_FILE" ]; then
+    head -n 1 "$REPO_VERSION_FILE"
+  elif [ -f "$INSTALLED_VERSION_FILE" ]; then
+    head -n 1 "$INSTALLED_VERSION_FILE"
+  else
+    echo "0.0.0-unknown"
+  fi
+}
+
+VERSION="$(read_version)"
+RAW_MESSAGE="$1"
+
+if [ "${RAW_MESSAGE:-}" = "--version" ] || [ "${RAW_MESSAGE:-}" = "version" ]; then
+  echo "pvexb-send-telegram v$VERSION"
+  exit 0
+fi
+
+DEFAULT_ENV_FILE="/root/.pvexb.env"
+LEGACY_ENV_FILE="/root/.backup-config.env"
+ENV_FILE="${PVEXB_TELEGRAM_ENV_FILE:-${TELEGRAM_ENV_FILE:-$DEFAULT_ENV_FILE}}"
+LOG_FILE="${TELEGRAM_LOG_FILE:-/var/log/pvexb/pvexb-telegram.log}"
+TIMEOUT="${TELEGRAM_TIMEOUT:-10}"
+RETRIES="${TELEGRAM_RETRIES:-2}"
+RETENTION_DAYS="${TELEGRAM_LOG_RETENTION_DAYS:-180}"
+
+LOG_DIR="$(dirname "$LOG_FILE")"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+if [ ! -d "$LOG_DIR" ] || [ ! -w "$LOG_DIR" ]; then
+  LOG_FILE="/tmp/pvexb-telegram.log"
+  LOG_DIR="/tmp"
+fi
+
+timestamp() {
+  date '+%Y-%m-%d %H:%M:%S'
+}
+
+log() {
+  echo "[$(timestamp)] $*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+error_exit() {
+  local code="$1"
+  shift
+  log "ERROR: $*"
+  echo "ERROR: $*" >&2
+  exit "$code"
+}
+
+if [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] && [ "$RETENTION_DAYS" -gt 0 ]; then
+  find "$LOG_DIR" -type f -name "$(basename "$LOG_FILE")*" -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
+fi
+
+if [ "$ENV_FILE" = "$DEFAULT_ENV_FILE" ] && [ ! -f "$ENV_FILE" ] && [ -f "$LEGACY_ENV_FILE" ]; then
+  ENV_FILE="$LEGACY_ENV_FILE"
+fi
+
+if [ -f "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  if ! source "$ENV_FILE"; then
+    error_exit 1 "Failed to load Telegram env file: $ENV_FILE. Check shell syntax or rerun install.sh."
+  fi
+else
+  error_exit 1 "Telegram env file not found: $ENV_FILE. Run ./install.sh or create /root/.pvexb.env with BOT_TOKEN and CHAT_ID."
+fi
+
+BOT_TOKEN="${BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
+CHAT_ID="${CHAT_ID:-${TELEGRAM_CHAT_ID:-}}"
+
+if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+  error_exit 1 "Missing BOT_TOKEN/CHAT_ID in $ENV_FILE. Rerun install.sh or edit the env file."
+fi
+
+if [[ "$BOT_TOKEN" == *"replace-with-your-telegram-bot-token"* ]] || [ "$CHAT_ID" = "123456789" ]; then
+  error_exit 1 "Telegram env file still contains placeholder credentials: $ENV_FILE. Rerun install.sh or edit the env file."
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  error_exit 1 "curl is not installed. Install curl before using Telegram notifications."
+fi
+
+if [ -z "$RAW_MESSAGE" ] || [[ "$RAW_MESSAGE" =~ ^[[:space:]]*$ ]]; then
+  log "ERROR: Empty message blocked"
+  exit 0
+fi
+
+API_URL="https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
+
+RESPONSE="$(curl -sS \
+  --max-time "$TIMEOUT" \
+  --retry "$RETRIES" \
+  --retry-delay 2 \
+  -X POST "$API_URL" \
+  -d chat_id="$CHAT_ID" \
+  -d text="$RAW_MESSAGE" \
+  -d parse_mode="HTML" 2>&1)"
+
+if echo "$RESPONSE" | grep -q '"ok":true'; then
+  log "OK: Telegram sent (len=${#RAW_MESSAGE})"
+else
+  log "ERROR: Telegram failed"
+  log "Response: $RESPONSE"
+  exit 1
+fi

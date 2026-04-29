@@ -1,0 +1,36 @@
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Logs and runtime output
+*.log
+logs/
+log/
+tmp/
+temp/
+*.tmp
+
+# Local env/config/secrets
+.env
+*.env
+!.env.example
+*.local
+*.secret
+
+# Test/install scratch dirs
+_tmp*/
+dist/
+build/
+tests/proxmox-docker/ISOs/
+tests/proxmox-docker/VM-Backup/
+tests/proxmox-docker/USB-Backup/
+tests/proxmox-docker/data/
+
+# Legacy reference files
+old-files/

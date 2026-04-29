@@ -1,0 +1,37 @@
+# PVEXB Proxmox USB Backup configuration.
+# Copy to /etc/pvexb.conf and adjust per node.
+
+# Guests to back up. Space-separated string is preferred for simple config files.
+VM_LIST="101 106 131 103 107 104"
+
+# Existing Proxmox mount/storage settings.
+MOUNT_POINT="/mnt/usb-backup"
+STORAGE_ID="usb-local-backup"
+
+# vzdump options.
+# Valid modes: snapshot, suspend, stop
+BACKUP_MODE="suspend"
+COMPRESS="zstd"
+
+# Wait for Home Assistant or another controller to power and mount the USB drive.
+WAIT_SECONDS=600
+WAIT_INTERVAL=5
+
+# Preflight free-space guard.
+MIN_FREE_GB=100
+
+# Logging.
+LOG_DIR="/var/log/pvexb"
+LOG_RETENTION_DAYS=180
+
+# Telegram.
+TELEGRAM_ENABLED=true
+TELEGRAM_SCRIPT="/usr/local/bin/pvexb-send-telegram"
+
+# v1 default: Home Assistant owns the smart plug and may also execute this script.
+# Future options:
+#   POWER_MODE="command" with POWER_ON_CMD/POWER_OFF_CMD
+#   POWER_MODE="homeassistant" when HA API control is implemented
+POWER_MODE="external"
+POWER_ON_CMD=""
+POWER_OFF_CMD=""

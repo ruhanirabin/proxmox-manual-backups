@@ -1,0 +1,8 @@
+[Unit]
+Description=PVEXB Proxmox USB backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pvexb-backup run

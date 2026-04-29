@@ -1,0 +1,10 @@
+[Unit]
+Description=Run PVEXB Proxmox USB backup monthly
+
+[Timer]
+OnCalendar=monthly
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

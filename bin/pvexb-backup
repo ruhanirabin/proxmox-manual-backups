@@ -1,0 +1,562 @@
+#!/usr/bin/env bash
+#
+# PVEXB Proxmox USB backup runner
+# Version: read from ../VERSION in repo or /usr/local/share/pvexb/VERSION after install
+# Relative dependencies:
+# - ../VERSION
+# - ../config/pvexb.conf.example
+# - ./pvexb-send-telegram
+# Installed dependencies:
+# - /etc/pvexb.conf
+# - /usr/local/bin/pvexb-send-telegram
+# - /usr/local/share/pvexb/VERSION
+
+set -u
+set -o pipefail
+
+APP_NAME="pvexb-backup"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+REPO_VERSION_FILE="$SCRIPT_DIR/../VERSION"
+INSTALLED_VERSION_FILE="/usr/local/share/pvexb/VERSION"
+
+read_version() {
+  if [ -f "$REPO_VERSION_FILE" ]; then
+    head -n 1 "$REPO_VERSION_FILE"
+  elif [ -f "$INSTALLED_VERSION_FILE" ]; then
+    head -n 1 "$INSTALLED_VERSION_FILE"
+  else
+    echo "0.0.0-unknown"
+  fi
+}
+
+VERSION="$(read_version)"
+
+DEFAULT_CONFIG_FILE="/etc/pvexb.conf"
+LEGACY_CONFIG_FILE="/etc/proxmox-usb-backup.conf"
+CONFIG_FILE="${PVEXB_CONFIG:-${PROXMOX_USB_BACKUP_CONFIG:-$DEFAULT_CONFIG_FILE}}"
+
+DEFAULT_LOG_DIR="/var/log/pvexb"
+DEFAULT_MAIN_LOG="$DEFAULT_LOG_DIR/pvexb-backup.log"
+DEFAULT_LOCK_FILE="/run/pvexb-backup.lock"
+DEFAULT_TELEGRAM_SCRIPT="/usr/local/bin/pvexb-send-telegram"
+INSTALL_HINT="Run ./install.sh from the pvexb repo, then review /etc/pvexb.conf and /root/.pvexb.env."
+
+RUN_ID="$(date '+%Y%m%d-%H%M%S')"
+NODE_NAME="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-node)"
+START_TS="$(date +%s)"
+
+LOG_DIR="$DEFAULT_LOG_DIR"
+MAIN_LOG="$DEFAULT_MAIN_LOG"
+RUN_LOG=""
+LOCK_FILE="$DEFAULT_LOCK_FILE"
+TELEGRAM_SCRIPT="$DEFAULT_TELEGRAM_SCRIPT"
+LOG_FALLBACK_APPLIED=false
+
+ACTION="${1:-run}"
+
+usage() {
+  cat <<EOF
+$APP_NAME v$VERSION
+
+Usage:
+  $APP_NAME [run]
+  $APP_NAME check
+  $APP_NAME unmount
+  $APP_NAME version
+
+Environment:
+  PVEXB_CONFIG=/path/to/config
+  PROXMOX_USB_BACKUP_CONFIG=/path/to/config  (legacy)
+
+Default config:
+  $DEFAULT_CONFIG_FILE
+EOF
+}
+
+ensure_log_dir() {
+  mkdir -p "$LOG_DIR" 2>/dev/null || true
+
+  if { [ ! -d "$LOG_DIR" ] || [ ! -w "$LOG_DIR" ]; } && [ "$LOG_FALLBACK_APPLIED" != "true" ]; then
+    LOG_DIR="/tmp"
+    MAIN_LOG="/tmp/pvexb-backup.log"
+    RUN_LOG=""
+    LOG_FALLBACK_APPLIED=true
+  fi
+
+  if [ -d "$LOG_DIR" ] && [ -z "$RUN_LOG" ]; then
+    RUN_LOG="$LOG_DIR/${RUN_ID}-${NODE_NAME}.log"
+  fi
+}
+
+timestamp() {
+  date '+%Y-%m-%d %H:%M:%S'
+}
+
+log() {
+  local level="$1"
+  shift
+  local line
+  line="[$(timestamp)] [$level] [$NODE_NAME] $*"
+  echo "$line"
+  ensure_log_dir
+  if [ -n "$RUN_LOG" ]; then
+    echo "$line" >> "$RUN_LOG" 2>/dev/null || true
+  fi
+  echo "$line" >> "$MAIN_LOG" 2>/dev/null || true
+}
+
+fail() {
+  local code="$1"
+  shift
+  log "ERROR" "$*"
+  return "$code"
+}
+
+html_escape() {
+  local value="$*"
+  value="${value//&/&amp;}"
+  value="${value//</&lt;}"
+  value="${value//>/&gt;}"
+  printf '%s' "$value"
+}
+
+notify() {
+  local level="$1"
+  local subject="$2"
+  local body="$3"
+
+  if [ "${TELEGRAM_ENABLED:-true}" != "true" ]; then
+    return 0
+  fi
+
+  if [ ! -x "$TELEGRAM_SCRIPT" ]; then
+    log "WARN" "Telegram helper not executable: $TELEGRAM_SCRIPT. $INSTALL_HINT"
+    return 0
+  fi
+
+  local message
+  message="<b>$(html_escape "$subject")</b>
+Node: <code>$(html_escape "$NODE_NAME")</code>
+Level: <code>$(html_escape "$level")</code>
+
+$(html_escape "$body")"
+
+  "$TELEGRAM_SCRIPT" "$message" >/dev/null 2>&1
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "WARN" "Telegram notification failed with exit code $rc"
+  fi
+  return 0
+}
+
+notify_without_config() {
+  local subject="$1"
+  local body="$2"
+  if [ -x "$TELEGRAM_SCRIPT" ]; then
+    "$TELEGRAM_SCRIPT" "<b>$(html_escape "$subject")</b>
+Node: <code>$(html_escape "$NODE_NAME")</code>
+
+$(html_escape "$body")" >/dev/null 2>&1 || true
+  fi
+}
+
+load_config() {
+  if [ "$CONFIG_FILE" = "$DEFAULT_CONFIG_FILE" ] && [ ! -f "$CONFIG_FILE" ] && [ -f "$LEGACY_CONFIG_FILE" ]; then
+    CONFIG_FILE="$LEGACY_CONFIG_FILE"
+  fi
+
+  if [ ! -f "$CONFIG_FILE" ]; then
+    log "ERROR" "Config file not found: $CONFIG_FILE. $INSTALL_HINT"
+    notify_without_config "$APP_NAME config missing" "Config file not found: $CONFIG_FILE. Run install.sh to generate it."
+    return 20
+  fi
+
+  if [ ! -r "$CONFIG_FILE" ]; then
+    log "ERROR" "Config file is not readable: $CONFIG_FILE. Check permissions or rerun install.sh."
+    notify_without_config "$APP_NAME config unreadable" "Config file is not readable: $CONFIG_FILE."
+    return 20
+  fi
+
+  # shellcheck disable=SC1090
+  if ! source "$CONFIG_FILE"; then
+    log "ERROR" "Failed to load config file: $CONFIG_FILE. Check shell syntax or rerun install.sh."
+    notify_without_config "$APP_NAME config load failed" "Failed to load config file: $CONFIG_FILE. Check shell syntax."
+    return 21
+  fi
+
+  LOG_DIR="${LOG_DIR:-$DEFAULT_LOG_DIR}"
+  MAIN_LOG="${MAIN_LOG:-$LOG_DIR/pvexb-backup.log}"
+  LOCK_FILE="${LOCK_FILE:-$DEFAULT_LOCK_FILE}"
+  TELEGRAM_SCRIPT="${TELEGRAM_SCRIPT:-$DEFAULT_TELEGRAM_SCRIPT}"
+
+  MOUNT_POINT="${MOUNT_POINT:-/mnt/usb-backup}"
+  STORAGE_ID="${STORAGE_ID:-usb-local-backup}"
+  BACKUP_MODE="${BACKUP_MODE:-suspend}"
+  COMPRESS="${COMPRESS:-zstd}"
+  WAIT_SECONDS="${WAIT_SECONDS:-600}"
+  WAIT_INTERVAL="${WAIT_INTERVAL:-5}"
+  MIN_FREE_GB="${MIN_FREE_GB:-100}"
+  LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-180}"
+  TELEGRAM_ENABLED="${TELEGRAM_ENABLED:-true}"
+  POWER_MODE="${POWER_MODE:-external}"
+  POWER_ON_CMD="${POWER_ON_CMD:-}"
+  POWER_OFF_CMD="${POWER_OFF_CMD:-}"
+
+  ensure_log_dir
+}
+
+vm_list_to_array() {
+  VM_IDS=()
+  if declare -p VM_LIST >/dev/null 2>&1 && declare -p VM_LIST 2>/dev/null | grep -q 'declare \-[aA]'; then
+    # shellcheck disable=SC2154
+    VM_IDS=("${VM_LIST[@]}")
+  elif [ -n "${VM_LIST:-}" ]; then
+    read -r -a VM_IDS <<< "$VM_LIST"
+  fi
+}
+
+validate_config() {
+  local errors=0
+
+  vm_list_to_array
+
+  if [ "${#VM_IDS[@]}" -eq 0 ]; then
+    log "ERROR" "VM_LIST is empty. Edit $CONFIG_FILE or rerun install.sh to generate a config."
+    errors=$((errors + 1))
+  fi
+
+  case "$BACKUP_MODE" in
+    snapshot|suspend|stop) ;;
+    *)
+      log "ERROR" "Invalid BACKUP_MODE: $BACKUP_MODE"
+      errors=$((errors + 1))
+      ;;
+  esac
+
+  case "$POWER_MODE" in
+    external|command|homeassistant) ;;
+    *)
+      log "ERROR" "Invalid POWER_MODE: $POWER_MODE"
+      errors=$((errors + 1))
+      ;;
+  esac
+
+  if ! [[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || [ "$WAIT_SECONDS" -lt 1 ]; then
+    log "ERROR" "WAIT_SECONDS must be a positive integer"
+    errors=$((errors + 1))
+  fi
+
+  if ! [[ "$WAIT_INTERVAL" =~ ^[0-9]+$ ]] || [ "$WAIT_INTERVAL" -lt 1 ]; then
+    log "ERROR" "WAIT_INTERVAL must be a positive integer"
+    errors=$((errors + 1))
+  fi
+
+  if ! [[ "$MIN_FREE_GB" =~ ^[0-9]+$ ]]; then
+    log "ERROR" "MIN_FREE_GB must be an integer"
+    errors=$((errors + 1))
+  fi
+
+  if [ "$errors" -ne 0 ]; then
+    notify "ERROR" "$APP_NAME config invalid" "One or more config values are invalid. Check $RUN_LOG"
+    return 21
+  fi
+}
+
+require_runtime_command() {
+  local name="$1"
+  local hint="$2"
+
+  if ! command -v "$name" >/dev/null 2>&1; then
+    log "ERROR" "Missing required command: $name. $hint"
+    notify "ERROR" "$APP_NAME dependency missing" "Missing required command: $name. $hint"
+    return 50
+  fi
+}
+
+validate_runtime_dependencies() {
+  local mode="$1"
+
+  require_runtime_command mountpoint "Install util-linux or run on a standard Proxmox host." || return $?
+  require_runtime_command df "Install coreutils or run on a standard Proxmox host." || return $?
+  require_runtime_command awk "Install awk/gawk or run on a standard Proxmox host." || return $?
+
+  case "$mode" in
+    run)
+      require_runtime_command flock "Install util-linux; locking is required to prevent concurrent backups." || return $?
+      require_runtime_command umount "Install util-linux or run on a standard Proxmox host." || return $?
+      require_runtime_command pvesm "Run this on a Proxmox host; pvesm is required to validate storage." || return $?
+      require_runtime_command vzdump "Run this on a Proxmox host; vzdump is required for backups." || return $?
+      ;;
+    check)
+      require_runtime_command pvesm "Run this on a Proxmox host; pvesm is required to validate storage." || return $?
+      ;;
+    unmount)
+      require_runtime_command umount "Install util-linux or run on a standard Proxmox host." || return $?
+      ;;
+  esac
+}
+
+prune_logs() {
+  if [[ "${LOG_RETENTION_DAYS:-180}" =~ ^[0-9]+$ ]] && [ "$LOG_RETENTION_DAYS" -gt 0 ] && [ -d "$LOG_DIR" ]; then
+    find "$LOG_DIR" -type f -name '*.log' -mtime +"$LOG_RETENTION_DAYS" -delete 2>/dev/null || true
+  fi
+}
+
+acquire_lock() {
+  local lock_dir
+  lock_dir="$(dirname "$LOCK_FILE")"
+  if [ ! -d "$lock_dir" ]; then
+    mkdir -p "$lock_dir" 2>/dev/null || true
+  fi
+
+  if ! exec 9>"$LOCK_FILE"; then
+    log "ERROR" "Unable to open lock file: $LOCK_FILE. Run as root or set LOCK_FILE to a writable path."
+    notify "ERROR" "$APP_NAME lock failed" "Unable to open lock file: $LOCK_FILE. Run as root or fix permissions."
+    return 30
+  fi
+
+  if ! flock -n 9; then
+    log "ERROR" "Another backup run is already active: $LOCK_FILE"
+    notify "ERROR" "$APP_NAME already running" "Another backup run is already active on $NODE_NAME."
+    return 30
+  fi
+}
+
+run_power_on() {
+  case "$POWER_MODE" in
+    external)
+      log "INFO" "Power mode is external; expecting Home Assistant or another controller to power the drive"
+      return 0
+      ;;
+    command)
+      if [ -z "$POWER_ON_CMD" ]; then
+        log "ERROR" "POWER_MODE=command requires POWER_ON_CMD"
+        notify "ERROR" "$APP_NAME power-on failed" "POWER_ON_CMD is not configured."
+        return 31
+      fi
+      log "INFO" "Running configured power-on command"
+      if ! bash -c "$POWER_ON_CMD"; then
+        notify "ERROR" "$APP_NAME power-on failed" "POWER_ON_CMD failed. Check /etc/pvexb.conf."
+        return 31
+      fi
+      return 0
+      ;;
+    homeassistant)
+      log "ERROR" "POWER_MODE=homeassistant is reserved for a future version"
+      notify "ERROR" "$APP_NAME unsupported power mode" "POWER_MODE=homeassistant is not implemented in this version."
+      return 32
+      ;;
+  esac
+}
+
+run_power_off() {
+  case "$POWER_MODE" in
+    external)
+      log "INFO" "Power mode is external; leaving power-off to Home Assistant or another controller"
+      return 0
+      ;;
+    command)
+      if [ -z "$POWER_OFF_CMD" ]; then
+        log "WARN" "POWER_MODE=command but POWER_OFF_CMD is not configured"
+        return 0
+      fi
+      log "INFO" "Running configured power-off command"
+      if ! bash -c "$POWER_OFF_CMD"; then
+        notify "ERROR" "$APP_NAME power-off failed" "POWER_OFF_CMD failed. Check /etc/pvexb.conf."
+        return 31
+      fi
+      return 0
+      ;;
+    homeassistant)
+      return 0
+      ;;
+  esac
+}
+
+wait_for_mount() {
+  local waited=0
+  while [ "$waited" -le "$WAIT_SECONDS" ]; do
+    if mountpoint -q "$MOUNT_POINT"; then
+      log "INFO" "Drive is mounted at $MOUNT_POINT"
+      return 0
+    fi
+    log "INFO" "Drive not mounted at $MOUNT_POINT; retrying in $WAIT_INTERVAL seconds"
+    sleep "$WAIT_INTERVAL"
+    waited=$((waited + WAIT_INTERVAL))
+  done
+
+  log "ERROR" "USB backup drive not mounted after $WAIT_SECONDS seconds: $MOUNT_POINT"
+  notify "ERROR" "$APP_NAME mount timeout" "USB backup drive did not mount at $MOUNT_POINT after $WAIT_SECONDS seconds."
+  return 40
+}
+
+check_storage() {
+  if ! pvesm status --storage "$STORAGE_ID" >/dev/null 2>&1; then
+    log "ERROR" "Proxmox storage ID is missing or unavailable: $STORAGE_ID. Check /etc/pvexb.conf and Proxmox storage configuration."
+    notify "ERROR" "$APP_NAME storage missing" "Proxmox storage ID is missing or unavailable: $STORAGE_ID"
+    return 41
+  fi
+}
+
+check_free_space() {
+  local available_kb available_gb
+  available_kb="$(df -Pk "$MOUNT_POINT" 2>/dev/null | awk 'NR==2 {print $4}')"
+  if [ -z "$available_kb" ]; then
+    log "ERROR" "Unable to read free space for $MOUNT_POINT"
+    notify "ERROR" "$APP_NAME free-space check failed" "Unable to read free space for $MOUNT_POINT."
+    return 42
+  fi
+
+  available_gb=$((available_kb / 1024 / 1024))
+  log "INFO" "Available USB backup space: ${available_gb}GB"
+
+  if [ "$available_gb" -lt "$MIN_FREE_GB" ]; then
+    log "ERROR" "Free space below threshold: ${available_gb}GB available, ${MIN_FREE_GB}GB required"
+    notify "ERROR" "$APP_NAME low free space" "${available_gb}GB available on $MOUNT_POINT; ${MIN_FREE_GB}GB required."
+    return 43
+  fi
+}
+
+preflight() {
+  wait_for_mount || return $?
+  check_storage || return $?
+  check_free_space || return $?
+}
+
+run_vzdump_for_guest() {
+  local vmid="$1"
+  log "INFO" "Starting backup for VM/LXC ID $vmid using mode=$BACKUP_MODE storage=$STORAGE_ID"
+
+  vzdump "$vmid" --storage "$STORAGE_ID" --compress "$COMPRESS" --mode "$BACKUP_MODE" >> "$RUN_LOG" 2>&1
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "INFO" "Backup succeeded for VM/LXC ID $vmid"
+  else
+    log "ERROR" "Backup failed for VM/LXC ID $vmid with exit code $rc"
+  fi
+  return "$rc"
+}
+
+unmount_drive() {
+  load_config || return $?
+  validate_runtime_dependencies unmount || return $?
+  ensure_log_dir
+
+  if ! mountpoint -q "$MOUNT_POINT"; then
+    log "INFO" "Mount point is not mounted; nothing to unmount: $MOUNT_POINT"
+    return 0
+  fi
+
+  log "INFO" "Unmounting $MOUNT_POINT"
+  umount "$MOUNT_POINT"
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "INFO" "Unmounted $MOUNT_POINT"
+  else
+    log "ERROR" "Failed to unmount $MOUNT_POINT with exit code $rc"
+    notify "ERROR" "$APP_NAME unmount failed" "Failed to unmount $MOUNT_POINT on $NODE_NAME. Keep the USB drive powered on until this is checked."
+  fi
+  return "$rc"
+}
+
+check_only() {
+  load_config || return $?
+  validate_config || return $?
+  validate_runtime_dependencies check || return $?
+  prune_logs
+  preflight
+}
+
+run_backup() {
+  load_config || return $?
+  validate_config || return $?
+  validate_runtime_dependencies run || return $?
+  prune_logs
+  acquire_lock || return $?
+
+  notify "INFO" "$APP_NAME started" "Backup run $RUN_ID started. Guests: ${VM_IDS[*]}. Storage: $STORAGE_ID. Mount: $MOUNT_POINT."
+
+  run_power_on
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "ERROR" "Power-on step failed with exit code $rc"
+    return "$rc"
+  fi
+
+  preflight
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$POWER_MODE" != "external" ]; then
+      run_power_off || true
+    fi
+    return "$rc"
+  fi
+
+  local success=0
+  local failed=0
+  local failed_ids=()
+
+  for vmid in "${VM_IDS[@]}"; do
+    if run_vzdump_for_guest "$vmid"; then
+      success=$((success + 1))
+    else
+      failed=$((failed + 1))
+      failed_ids+=("$vmid")
+      notify "ERROR" "$APP_NAME guest backup failed" "Backup failed for VM/LXC ID $vmid. Run log: $RUN_LOG"
+    fi
+  done
+
+  unmount_drive
+  local unmount_rc=$?
+  if [ "$unmount_rc" -eq 0 ]; then
+    run_power_off || log "WARN" "Power-off command failed with exit code $?"
+  fi
+
+  local end_ts duration summary_level result_text free_after
+  end_ts="$(date +%s)"
+  duration=$((end_ts - START_TS))
+  free_after="$(df -h "$MOUNT_POINT" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+
+  if [ "$failed" -eq 0 ] && [ "$unmount_rc" -eq 0 ]; then
+    summary_level="INFO"
+    result_text="SUCCESS"
+    rc=0
+  else
+    summary_level="ERROR"
+    result_text="FAILED"
+    rc=60
+  fi
+
+  notify "$summary_level" "$APP_NAME finished: $result_text" "Run: $RUN_ID
+Succeeded: $success
+Failed: $failed
+Failed IDs: ${failed_ids[*]:-none}
+Duration: ${duration}s
+Free space after run: ${free_after:-unknown}
+Run log: $RUN_LOG"
+
+  log "$summary_level" "Backup run finished: result=$result_text success=$success failed=$failed duration=${duration}s failed_ids=${failed_ids[*]:-none}"
+  return "$rc"
+}
+
+case "$ACTION" in
+  run)
+    run_backup
+    ;;
+  check)
+    check_only
+    ;;
+  unmount)
+    unmount_drive
+    ;;
+  version)
+    echo "$APP_NAME v$VERSION"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  pve-1:
+    image: ghcr.io/longqt-sea/proxmox-ve
+    container_name: pvexb-pve-1
+    hostname: pve-1
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    ports:
+      - "2222:22"
+      - "3128:3128"
+      - "8006:8006"
+    environment:
+      - PASSWORD=123
+    volumes:
+      - /dev/vfio:/dev/vfio
+      - /usr/lib/modules:/usr/lib/modules:ro
+      - /sys/kernel/security:/sys/kernel/security
+      - ./VM-Backup:/var/lib/vz/dump
+      - ./ISOs:/var/lib/vz/template/iso
+      - ./USB-Backup:/mnt/usb-backup
+      - ../../:/opt/pvexb:ro
+    cap_add:
+      - ALL
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+      - systempaths=unconfined
+    device_cgroup_rules:
+      - "a *:* rwm"

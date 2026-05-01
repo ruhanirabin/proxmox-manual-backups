@@ -11,8 +11,8 @@ The root `VERSION` file is the single source of truth; `CHANGELOG.md` tracks Sem
 This keeps the existing Home Assistant flow intact:
 
 1. Home Assistant turns on the smart plug for the external USB drive.
-2. Home Assistant executes a backup command on the Proxmox node.
-3. The script waits for `/mnt/usb-backup`.
+2. Home Assistant mounts the USB drive and executes a backup command on the Proxmox node.
+3. The script waits for `/mnt/usb-backup` to be mounted (if not already).
 4. The script runs `vzdump` for the configured VM/LXC IDs.
 5. The script unmounts the USB drive.
 6. Home Assistant turns off the plug after its existing timeout window.
@@ -127,13 +127,6 @@ Existing Home Assistant commands can continue to use:
 /usr/local/bin/unmount_usb_backup.sh
 ```
 
-Recommended new Home Assistant `configuration.yaml` line:
-
-```yaml
-shell_command:
-  pvexb_backup: "ssh root@proxmox-node /usr/local/bin/pvexb-backup run"
-```
-
 Other commands:
 
 ```bash
@@ -143,6 +136,75 @@ Other commands:
 ```
 
 `check` validates config, waits for the mount, checks Proxmox storage, and checks free space without running `vzdump`.
+
+## External Triggering
+
+PVEXB does **not** mount or power the USB drive. It only waits for the mount point to appear. Power control and mounting are handled by an external system (Home Assistant, another agent, or manual SSH).
+
+### Home Assistant
+
+**Simple approach: direct mount + backup in one SSH call**
+
+```yaml
+shell_command:
+  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'mount /dev/disk/by-uuid/<USB-UUID> /mnt/usb-backup && sleep 5 && /usr/local/bin/proxmox_usb_backup.sh'"
+```
+
+Replace `<USB-UUID>` with the UUID from `lsblk -f` on the Proxmox node. The flow:
+
+1. HA turns on smart plug
+2. HA runs the shell command (mount, settle, backup)
+3. PVEXB waits for mount (already mounted, so proceeds), runs vzdump, unmounts
+4. HA turns off smart plug after its timeout
+
+**Alternative: mount separately, then backup**
+
+```yaml
+shell_command:
+  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 /usr/local/bin/proxmox_usb_backup.sh"
+```
+
+In this case, HA must mount the drive before calling the backup command (e.g., via a separate shell_command or a mount script).
+
+**Systemd mount unit approach** (if you have a properly configured unit):
+
+```yaml
+shell_command:
+  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'systemctl start mnt-usb\\x2dbackup.mount && sleep 10 && /usr/local/bin/proxmox_usb_backup.sh'"
+```
+
+Note the `\\x2d` escaping for hyphens in the systemd unit name.
+
+### Other Automation Systems / AI Agents
+
+Any external system can trigger PVEXB via SSH:
+
+```bash
+# Step 1: Power on USB drive (smart plug, relay, etc.)
+# Step 2: Mount the drive
+ssh root@proxmox-node "mount /dev/disk/by-uuid/<USB-UUID> /mnt/usb-backup"
+sleep 5
+
+# Step 3: Run backup
+ssh root@proxmox-node "/usr/local/bin/pvexb-backup run"
+
+# Step 4: Power off USB drive after backup completes
+```
+
+PVEXB handles the wait-for-mount, per-VM backup, auto-unmount, and notifications. The external system only needs to handle power control and initial mount.
+
+## Retention
+
+Backup retention is controlled by the Proxmox storage definition in `/etc/pve/storage.cfg`:
+
+```
+dir: usb-local-backup
+    path /mnt/usb-backup
+    content backup
+    prune-backups keep-last=3
+```
+
+This means `vzdump` keeps the last 3 backups per VM. Edit `keep-last` to change the retention count.
 
 ## Optional Systemd Timer
 
@@ -196,6 +258,88 @@ Common recovery:
 nano /etc/pvexb.conf
 nano /root/.pvexb.env
 /usr/local/bin/pvexb-backup check
+```
+
+## Troubleshooting
+
+### USB drive is powered on but not mounted
+
+PVEXB does **not** mount the drive -- it only waits for it. The drive must be mounted by something else before PVEXB runs.
+
+```bash
+# Check if mounted
+mountpoint -q /mnt/usb-backup && echo "MOUNTED" || echo "NOT MOUNTED"
+
+# Find the USB partition and its UUID
+lsblk -f | grep -v loop
+
+# Mount manually
+mount /dev/sdX1 /mnt/usb-backup
+# Or by UUID:
+mount /dev/disk/by-uuid/<UUID> /mnt/usb-backup
+```
+
+### Why did my backups stop working?
+
+The most common reason: the USB drive was powered on but **never auto-mounted** after a power cycle. The old script only waited for the mount point -- if nothing mounted it, backups silently failed.
+
+**Fix:** ensure the drive gets mounted before PVEXB runs. The simplest approach is to include `mount` in your HA shell_command (see External Triggering above).
+
+### PVEXB check fails with storage error
+
+```bash
+pvesm status --storage usb-local-backup
+```
+
+If this fails, the Proxmox storage definition in `/etc/pve/storage.cfg` is missing or misconfigured. Ensure the `dir` storage entry exists and points to `/mnt/usb-backup`.
+
+### Low free space error
+
+```bash
+df -h /mnt/usb-backup
+```
+
+PVEXB enforces `MIN_FREE_GB` (default 100GB) before starting backups. Clean old backups or reduce retention with `prune-backups` in `/etc/pve/storage.cfg`.
+
+### Another backup is already running
+
+PVEXB uses a lock file at `/run/pvexb-backup.lock` to prevent concurrent runs. If a previous run crashed and left a stale lock:
+
+```bash
+rm -f /run/pvexb-backup.lock
+```
+
+### Telegram notifications not working
+
+1. Check credentials: `cat /root/.pvexb.env`
+2. Test the helper directly: `/usr/local/bin/pvexb-send-telegram "test"`
+3. Ensure `TELEGRAM_ENABLED=true` in `/etc/pvexb.conf`
+4. Check the Telegram log: `cat /var/log/pvexb/pvexb-telegram.log`
+
+### Logs
+
+- Main log: `/var/log/pvexb/pvexb-backup.log`
+- Per-run logs: `/var/log/pvexb/<RUN-ID>-<NODE>.log`
+- Watch live: `tail -f /var/log/pvexb/pvexb-backup.log`
+
+### systemd mount unit with hyphens in path
+
+If you use a systemd mount unit for `/mnt/usb-backup`, the unit filename **must** use `\x2d` to encode the hyphen:
+
+```
+/etc/systemd/system/mnt-usb\x2dbackup.mount
+```
+
+The backslash-x2d is literal in the filename. Inside the file, use the real path:
+
+```
+Where=/mnt/usb-backup
+```
+
+To trigger it from SSH/HA, escape the backslash twice:
+
+```bash
+systemctl start mnt-usb\\x2dbackup.mount
 ```
 
 ## Future Power Control

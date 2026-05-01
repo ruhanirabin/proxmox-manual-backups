@@ -2,6 +2,13 @@
 
 All notable changes follow Semantic Versioning.
 
+## [0.7.8] - 2026-05-01
+
+- Added comprehensive troubleshooting section to README covering: mount failures, silent backup detection, storage errors, low free space, stale locks, Telegram issues, systemd hyphen escaping, and log locations.
+- Added external triggering section with Home Assistant, systemd, and SSH/agent integration examples including direct mount approach.
+- Added retention documentation explaining prune-backups in storage.cfg.
+- Clarified that PVEXB does not mount or power the USB drive — only waits for mount.
+
 ## [0.7.7] - 2026-05-01
 
 - Fixed GitHub one-line install: added `chmod +x install.sh` after tar extraction since `.tar.gz` archives from GitHub do not preserve executable permissions.

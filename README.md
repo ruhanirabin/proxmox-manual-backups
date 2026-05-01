@@ -69,7 +69,7 @@ Run on each Proxmox host as `root`.
 Quick install from GitHub:
 
 ```bash
-bash -c 'set -euo pipefail; tmp="$(mktemp -d)"; trap "rm -rf \"$tmp\"" EXIT; curl -fsSL https://github.com/ruhanirabin/proxmox-manual-backups/archive/refs/heads/main.tar.gz | tar -xz -C "$tmp" --strip-components=1; cd "$tmp"; ./install.sh'
+bash -c 'set -euo pipefail; tmp="$(mktemp -d)"; trap "rm -rf \"$tmp\"" EXIT; curl -fsSL https://github.com/ruhanirabin/proxmox-manual-backups/archive/refs/heads/main.tar.gz | tar -xz -C "$tmp" --strip-components=1; cd "$tmp"; chmod +x install.sh; ./install.sh'
 ```
 
 The one-liner downloads this repository into a temporary directory, runs `install.sh`, and installs `pvexb-backup` plus compatibility wrappers under `/usr/local/bin`.
@@ -84,13 +84,13 @@ chmod +x install.sh
 The installer prompts for Telegram `BOT_TOKEN` and `CHAT_ID` when run interactively. You can pass parameters as environment variables before the command:
 
 ```bash
-BOT_TOKEN="123456789:token" CHAT_ID="123456789" ./install.sh
+BOT_TOKEN="***" CHAT_ID="123456789" ./install.sh
 ```
 
 One-line install with Telegram credentials:
 
 ```bash
-BOT_TOKEN="123456789:token" CHAT_ID="123456789" bash -c 'set -euo pipefail; tmp="$(mktemp -d)"; trap "rm -rf \"$tmp\"" EXIT; curl -fsSL https://github.com/ruhanirabin/proxmox-manual-backups/archive/refs/heads/main.tar.gz | tar -xz -C "$tmp" --strip-components=1; cd "$tmp"; ./install.sh'
+BOT_TOKEN="***" CHAT_ID="123456789" bash -c 'set -euo pipefail; tmp="$(mktemp -d)"; trap "rm -rf \"$tmp\"" EXIT; curl -fsSL https://github.com/ruhanirabin/proxmox-manual-backups/archive/refs/heads/main.tar.gz | tar -xz -C "$tmp" --strip-components=1; cd "$tmp"; chmod +x install.sh; ./install.sh'
 ```
 
 Available installer environment parameters:

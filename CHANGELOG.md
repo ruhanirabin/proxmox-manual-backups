@@ -2,6 +2,10 @@
 
 All notable changes follow Semantic Versioning.
 
+## [0.7.7] - 2026-05-01
+
+- Fixed GitHub one-line install: added `chmod +x install.sh` after tar extraction since `.tar.gz` archives from GitHub do not preserve executable permissions.
+
 ## [0.7.6] - 2026-04-29
 
 - Added agent instructions for committing and syncing completed version changes to the public GitHub repository.

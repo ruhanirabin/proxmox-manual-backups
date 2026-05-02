@@ -455,7 +455,25 @@ Trigger (HA / systemd / SSH)
    ls /mnt/pve/prox-backup
    umount /mnt/pve/prox-backup
    ```
-6. **Run `pvexb-backup check`** to validate full configuration.
+6. **Configure Proxmox storage** (`/etc/pve/storage.cfg`):
+
+   **IMPORTANT:** Do NOT define the NFS share as `nfs:` in Proxmox — this will cause GUI hangs when the NAS is asleep. Use a `dir:` entry pointing at the mount point instead. The script handles mount/unmount around each backup.
+
+   If you have an existing `nfs:` entry, remove it first. Then add:
+
+   ```
+   dir: prox-backup
+       path /mnt/pve/prox-backup
+       content backup
+       prune-backups keep-last=3
+       shared 0
+   ```
+
+   Set `STORAGE_ID="prox-backup"` in `/etc/pvexb.conf` to match the storage name above.
+
+   When the NAS is asleep and the NFS is unmounted, Proxmox sees an empty local directory — not a hung NFS connection. This prevents the WebUI from freezing.
+
+7. **Run `pvexb-backup check`** to validate full configuration.
 
 ### USB vs Network Backup Comparison
 

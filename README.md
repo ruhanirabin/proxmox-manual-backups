@@ -396,12 +396,13 @@ Trigger (HA / systemd / SSH)
 | `NAS_MAC` | Yes | MAC address of NAS Ethernet port for WOL | `00:11:22:33:44:55` |
 | `NAS_IP` | Yes | IP address of the NAS | `192.168.71.50` |
 | `NAS_SSH_USER` | Optional | SSH user for NAS sleep command (default: `root`) | `admin` |
+| `NAS_SSH_KEY` | Optional | SSH private key path for NAS authentication | `~/.ssh/nas_key` |
 | `NFS_EXPORT` | Yes | NFS export path on the NAS | `/volume1/proxmox-backups` |
-| `NFS_OPTIONS` | Optional | NFS mount options (default: `nolock,soft,timeo=30`) | `nolock,soft,timeo=30` |
-| `NAS_SLEEP_MODE` | Optional | How to sleep the NAS: `ssh` or `custom` (default: `ssh`) | `ssh` |
-| `NAS_SLEEP_CMD` | Optional | Custom command to sleep NAS (used when `NAS_SLEEP_MODE=custom`) | `curl http://nas/sleep` |
-| `NAS_SLEEP_WINDOW` | Optional | Cron expression for when NAS sleep is allowed | `0 1 * * 1-5` |
-| `NAS_PING_TIMEOUT` | Optional | Max seconds to wait for NAS to respond to ping (default: `120`) | `180` |
+| `NFS_OPTIONS` | Optional | NFS mount options (default: `soft,noatime,nofail,vers=4.1`) | `soft,timeo=30` |
+| `NAS_SLEEP_MODE` | Optional | How to sleep NAS: `disabled`, `ssh`, or `command` (default: `disabled`) | `ssh` |
+| `NAS_SLEEP_CMD` | Optional | Command to sleep NAS (default: `synopoweroff -s`) | `poweroff` |
+| `NAS_SLEEP_WINDOW` | Optional | When to allow sleep: `Mon-Fri 01:00-07:00`, `daily`, or empty (always) | `Mon-Fri 01:00-07:00` |
+| `NAS_PING_TIMEOUT` | Optional | Max seconds to wait for NAS ping (default: `300`) | `180` |
 | `NAS_PING_INTERVAL` | Optional | Seconds between ping retries (default: `5`) | `10` |
 
 #### Setup Checklist
@@ -432,14 +433,15 @@ Trigger (HA / systemd / SSH)
    NAS_IP="192.168.71.50"
    NAS_SSH_USER="admin"
    NFS_EXPORT="/volume1/proxmox-backups"
-   NFS_OPTIONS="nolock,soft,timeo=30"
+   NFS_OPTIONS="soft,noatime,nofail,vers=4.1"
    NAS_SLEEP_MODE="ssh"
-   NAS_SLEEP_WINDOW="0 1 * * 1-5"
-   ```
+   NAS_SLEEP_WINDOW="Mon-Fri 01:00-07:00"
+```
 3. **Set up SSH key for NAS sleep** (if using `NAS_SLEEP_MODE=ssh`):
    ```bash
    ssh-keygen -t ed25519 -f ~/.ssh/nas_key -N ""
    ssh-copy-id -i ~/.ssh/nas_key admin@192.168.71.50
+   # Then set NAS_SSH_KEY="~/.ssh/nas_key" in /etc/pvexb.conf
    ```
 4. **Test WOL manually:**
    ```bash
@@ -448,9 +450,10 @@ Trigger (HA / systemd / SSH)
    ```
 5. **Test NFS mount:**
    ```bash
-   mount -t nfs 192.168.71.50:/volume1/proxmox-backups /mnt/usb-backup
-   ls /mnt/usb-backup
-   umount /mnt/usb-backup
+   mkdir -p /mnt/pve/prox-backup
+   mount -t nfs 192.168.71.50:/volume1/proxmox-backups /mnt/pve/prox-backup
+   ls /mnt/pve/prox-backup
+   umount /mnt/pve/prox-backup
    ```
 6. **Run `pvexb-backup check`** to validate full configuration.
 

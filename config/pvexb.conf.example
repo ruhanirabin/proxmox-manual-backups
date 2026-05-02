@@ -35,3 +35,27 @@ TELEGRAM_SCRIPT="/usr/local/bin/pvexb-send-telegram"
 POWER_MODE="external"
 POWER_ON_CMD=""
 POWER_OFF_CMD=""
+
+# --- Network Backup Mode (POWER_MODE=network) ---
+# For NFS backups to a sleeping/wakeable NAS (e.g., Synology).
+# The script sends WOL, waits for ping, mounts NFS, backs up, unmounts, then sleeps NAS.
+# Leave these empty if using POWER_MODE=external (USB).
+
+# NAS network settings
+NAS_MAC=""                           # WOL MAC address (required for network mode)
+NAS_IP=""                            # NAS IP address (required for network mode)
+NAS_SSH_USER="root"                  # SSH user for sleep command
+NAS_SSH_KEY=""                       # Optional: SSH private key path
+
+# NFS settings
+NFS_EXPORT=""                        # NFS export path, e.g. /volume1/prox-backup-node-02
+NFS_OPTIONS="soft,noatime,nofail,vers=4.1"  # NFS mount options
+
+# NAS sleep settings
+NAS_SLEEP_MODE="disabled"            # disabled | ssh | command
+NAS_SLEEP_CMD="synopoweroff -s"      # Command to sleep NAS (used by ssh or command mode)
+NAS_SLEEP_WINDOW=""                  # Sleep window: "Mon-Fri 01:00-07:00" or "daily" or empty (always sleep)
+
+# Wake timeout settings (seconds)
+NAS_PING_TIMEOUT=300                 # Max time to wait for NAS to respond to ping
+NAS_PING_INTERVAL=5                  # Seconds between ping attempts

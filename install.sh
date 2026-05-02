@@ -211,6 +211,43 @@ configure_telegram_env() {
   fi
 }
 
+check_network_dependencies() {
+  if [ ! -f "$CONFIG_FILE" ]; then
+    return 0
+  fi
+  
+  # Source config to check POWER_MODE (silently, ignore errors)
+  local power_mode=""
+  power_mode=$(grep -E '^\s*POWER_MODE=' "$CONFIG_FILE" 2>/dev/null | head -n1 | cut -d= -f2 | tr -d '"' | tr -d "'")
+  
+  if [ "$power_mode" != "network" ]; then
+    return 0
+  fi
+  
+  echo
+  echo "Network backup mode detected."
+  
+  local missing=0
+  if ! command -v wakeonlan >/dev/null 2>&1 && ! command -v etherwake >/dev/null 2>&1; then
+    echo "  WARNING: Neither wakeonlan nor etherwake found. Install one: apt-get install wakeonlan"
+    missing=1
+  fi
+  
+  if ! command -v mount >/dev/null 2>&1; then
+    echo "  WARNING: mount command not found (should be in util-linux)"
+    missing=1
+  fi
+  
+  if ! command -v nfs-common >/dev/null 2>&1 && ! dpkg -l nfs-common >/dev/null 2>&1 2>/dev/null; then
+    echo "  WARNING: nfs-common package may not be installed. Install: apt-get install nfs-common"
+    missing=1
+  fi
+  
+  if [ "$missing" -eq 0 ]; then
+    echo "  All network backup dependencies satisfied."
+  fi
+}
+
 disable_systemd_units_for_ha_mode() {
   if [ "$PVEXB_DISABLE_SYSTEMD" != "true" ]; then
     echo "Skipping systemd disable check because PVEXB_DISABLE_SYSTEMD=$PVEXB_DISABLE_SYSTEMD"
@@ -260,6 +297,8 @@ if [ ! -f "$TELEGRAM_ENV_FILE" ] && [ -f "$LEGACY_TELEGRAM_ENV_FILE" ]; then
 fi
 
 configure_telegram_env
+
+check_network_dependencies
 
 # Compatibility wrappers for previous command names and existing Home Assistant commands.
 install -m 0755 bin/proxmox-usb-backup "$PREFIX/proxmox-usb-backup"

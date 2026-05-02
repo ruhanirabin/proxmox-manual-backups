@@ -1,201 +1,90 @@
-# PVEXB Proxmox Network/USB Backup Script
+# PVEXB — Proxmox Backup Tool
 
-Reusable Bash tooling for Proxmox backups with Home Assistant-compatible triggering, per-node configuration, logging, and Telegram notifications. Supports both USB external drive and network/NAS backup targets. It is possible to make it work together from Cron, HomeAssistant Trigger, and SSH. Recently implemented WOL for NAS based solutions.
+Reusable Bash tooling for Proxmox VM/LXC backups with Home Assistant-compatible triggering, per-node configuration, locking, logging, and Telegram notifications. Supports both USB external drives and network/NAS targets via NFS.
 
 `pvexb-` is the canonical prefix for installed files to reduce naming conflicts on shared Proxmox hosts.
 
 The root `VERSION` file is the single source of truth; `CHANGELOG.md` tracks SemVer changes.
 
-## Current Flow
+## Features
 
-This keeps the existing Home Assistant flow intact:
+- Per-VM/LXC backup with per-run logging
+- Lock file prevents concurrent runs
+- Configurable retention via Proxmox `prune-backups`
+- Telegram notifications on success, failure, or partial runs
+- Home Assistant, systemd timer, or manual SSH triggering
+- Two backup modes: USB external drive or network/NFS NAS
+- NAS power management: WOL wake, NFS mount/unmount, post-backup shutdown
 
-1. Home Assistant turns on the smart plug for the external USB drive.
-2. Home Assistant mounts the USB drive and executes a backup command on the Proxmox node.
-3. The script waits for `/mnt/usb-backup` to be mounted (if not already).
-4. The script runs `vzdump` for the configured VM/LXC IDs.
-5. The script unmounts the USB drive.
-6. Home Assistant turns off the plug after its existing timeout window.
-
-The default `POWER_MODE="external"` means Home Assistant or another external automation owns power control. Set `POWER_MODE="network"` to use a WOL-capable NAS with NFS instead.
-
-## Canonical Names
-
-- Main command: `/usr/local/bin/pvexb-backup`
-- Telegram helper: `/usr/local/bin/pvexb-send-telegram`
-- Config file: `/etc/pvexb.conf`
-- Telegram env file: `/root/.pvexb.env`
-- Log directory: `/var/log/pvexb`
-- Logrotate file: `/etc/logrotate.d/pvexb-backup`
-- Optional systemd unit: `pvexb-backup.service`
-- Optional systemd timer: `pvexb-backup.timer`
-
-## Compatibility Names
-
-The installer also deploys wrappers for previous names:
-
-- `/usr/local/bin/proxmox-usb-backup`
-- `/usr/local/bin/proxmox_usb_backup.sh`
-- `/usr/local/bin/unmount_usb_backup.sh`
-- `/usr/local/bin/send_telegram.sh`
-
-The runner also falls back from `/etc/pvexb.conf` to `/etc/proxmox-usb-backup.conf`, and the Telegram helper falls back from `/root/.pvexb.env` to `/root/.backup-config.env`.
-
-## Files
-
-- `bin/pvexb-backup` - main runner
-- `bin/pvexb-send-telegram` - Telegram Bot API helper
-- `bin/proxmox-usb-backup` - compatibility wrapper
-- `bin/proxmox_usb_backup.sh` - compatibility wrapper for the original backup script name
-- `bin/unmount_usb_backup.sh` - compatibility wrapper for the original unmount script name
-- `bin/send_telegram.sh` - compatibility wrapper
-- `config/pvexb.conf.example` - per-node backup config
-- `config/pvexb.env.example` - Telegram credentials example
-- `install.sh` - installer for Proxmox nodes
-- `VERSION` - single source of truth for the release version
-- `CHANGELOG.md` - SemVer changelog
-- `LICENSE` - MIT license
-- `.gitignore` - local artifact and legacy-file exclusions
-- `AGENTS.md` - concise repo instructions for AI agents
-- `tests/proxmox-docker/` - optional privileged Proxmox-in-Docker test harness
-- `systemd/pvexb-backup.service` - optional systemd service
-- `systemd/pvexb-backup.timer` - optional monthly timer
-- `logrotate/pvexb-backup` - six-month log rotation
+---
 
 ## Install
 
 Run on each Proxmox host as `root`.
 
-Quick install from GitHub:
+**Quick install from GitHub:**
 
 ```bash
 bash -c 'set -euo pipefail; tmp="$(mktemp -d)"; trap "rm -rf \"$tmp\"" EXIT; curl -fsSL https://github.com/ruhanirabin/proxmox-manual-backups/archive/refs/heads/main.tar.gz | tar -xz -C "$tmp" --strip-components=1; cd "$tmp"; chmod +x install.sh; ./install.sh'
 ```
 
-The one-liner downloads this repository into a temporary directory, runs `install.sh`, and installs `pvexb-backup` plus compatibility wrappers under `/usr/local/bin`.
+**With Telegram credentials pre-filled:**
 
-If you already have a local checkout, run:
+```bash
+BOT_TOKEN="***" CHAT_ID="123456789" bash -c 'set -euo pipefail; tmp="$(mktemp -d)"; trap "rm -rf \"$tmp\"" EXIT; curl -fsSL https://github.com/ruhanirabin/proxmox-manual-backups/archive/refs/heads/main.tar.gz | tar -xz -C "$tmp" --strip-components=1; cd "$tmp"; chmod +x install.sh; ./install.sh'
+```
+
+**From a local checkout:**
 
 ```bash
 chmod +x install.sh
 ./install.sh
 ```
 
-The installer prompts for Telegram `BOT_TOKEN` and `CHAT_ID` when run interactively. You can pass parameters as environment variables before the command:
-
-```bash
-BOT_TOKEN="***" CHAT_ID="123456789" ./install.sh
-```
-
-One-line install with Telegram credentials:
-
-```bash
-BOT_TOKEN="***" CHAT_ID="123456789" bash -c 'set -euo pipefail; tmp="$(mktemp -d)"; trap "rm -rf \"$tmp\"" EXIT; curl -fsSL https://github.com/ruhanirabin/proxmox-manual-backups/archive/refs/heads/main.tar.gz | tar -xz -C "$tmp" --strip-components=1; cd "$tmp"; chmod +x install.sh; ./install.sh'
-```
-
-Available installer environment parameters:
-
-- `BOT_TOKEN` and `CHAT_ID` - write Telegram credentials to `/root/.pvexb.env`.
-- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` - legacy aliases for the same credentials.
-- `PVEXB_INSTALL_NONINTERACTIVE=true` - skip prompts and create the example Telegram env file if credentials are not supplied.
-- `PVEXB_DISABLE_SYSTEMD=false` - do not disable existing `pvexb-backup.service` or `pvexb-backup.timer` during install.
-- `PREFIX=/custom/bin`, `CONFIG_FILE=/custom/pvexb.conf`, `TELEGRAM_ENV_FILE=/custom/.pvexb.env`, and `LOG_DIR=/custom/log` - override install paths for advanced setups.
-
-Then review:
+After install, review and edit:
 
 ```bash
 nano /etc/pvexb.conf
 nano /root/.pvexb.env
 ```
 
-If an older install already has `/etc/proxmox-usb-backup.conf` or `/root/.backup-config.env`, `install.sh` copies those into the new `pvexb-` paths on first install.
+---
 
-If the old `/usr/local/bin/proxmox_usb_backup.sh` exists and no config file exists yet, `install.sh` also tries to migrate its hard-coded `VM_LIST`, `MOUNT_POINT`, `STORAGE_ID`, and `MODE` values into `/etc/pvexb.conf`. Before replacing old command names with compatibility wrappers, it backs up non-`pvexb` legacy files under `/usr/local/share/pvexb/legacy-backups/<timestamp>/`.
+## Choose Your Setup
 
-## Usage
+Pick the setup that matches your hardware:
 
-Canonical command:
+| | USB External Drive | Network NAS |
+|---|---|---|
+| `POWER_MODE` | `external` (default) | `network` |
+| Target | USB drive on smart plug | Synology/QNAP via NFS |
+| Power control | External (HA smart plug) | Built-in WOL |
+| Mount | HA mounts USB | Script mounts NFS on-demand |
 
-```bash
-/usr/local/bin/pvexb-backup run
+Continue to the matching section below.
+
+---
+
+## Setup: USB Backup
+
+### How It Works
+
+```
+HA turns on smart plug
+        │
+        ▼
+HA mounts USB drive → triggers pvexb-backup via SSH
+        │
+        ▼
+pvexb-backup waits for mount → runs vzdump → unmounts
+        │
+        ▼
+HA turns off smart plug (after timeout)
 ```
 
-Existing Home Assistant commands can continue to use:
+PVEXB does **not** mount or power the USB drive. It only waits for the mount point to appear. Power control and mounting are handled externally.
 
-```bash
-/usr/local/bin/proxmox_usb_backup.sh
-/usr/local/bin/unmount_usb_backup.sh
-```
-
-Other commands:
-
-```bash
-/usr/local/bin/pvexb-backup check
-/usr/local/bin/pvexb-backup unmount
-/usr/local/bin/pvexb-backup version
-```
-
-`check` validates config, waits for the mount, checks Proxmox storage, and checks free space without running `vzdump`.
-
-## External Triggering
-
-PVEXB does **not** mount or power the USB drive. It only waits for the mount point to appear. Power control and mounting are handled by an external system (Home Assistant, another agent, or manual SSH).
-
-### Home Assistant
-
-**Simple approach: direct mount + backup in one SSH call**
-
-```yaml
-shell_command:
-  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'mount /dev/disk/by-uuid/<USB-UUID> /mnt/usb-backup && sleep 5 && /usr/local/bin/proxmox_usb_backup.sh'"
-```
-
-Replace `<USB-UUID>` with the UUID from `lsblk -f` on the Proxmox node. The flow:
-
-1. HA turns on smart plug
-2. HA runs the shell command (mount, settle, backup)
-3. PVEXB waits for mount (already mounted, so proceeds), runs vzdump, unmounts
-4. HA turns off smart plug after its timeout
-
-**Alternative: mount separately, then backup**
-
-```yaml
-shell_command:
-  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 /usr/local/bin/proxmox_usb_backup.sh"
-```
-
-In this case, HA must mount the drive before calling the backup command (e.g., via a separate shell_command or a mount script).
-
-**Systemd mount unit approach** (if you have a properly configured unit):
-
-```yaml
-shell_command:
-  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'systemctl start mnt-usb\\x2dbackup.mount && sleep 10 && /usr/local/bin/proxmox_usb_backup.sh'"
-```
-
-Note the `\\x2d` escaping for hyphens in the systemd unit name.
-
-### Other Automation Systems / AI Agents
-
-Any external system can trigger PVEXB via SSH:
-
-```bash
-# Step 1: Power on USB drive (smart plug, relay, etc.)
-# Step 2: Mount the drive
-ssh root@proxmox-node "mount /dev/disk/by-uuid/<USB-UUID> /mnt/usb-backup"
-sleep 5
-
-# Step 3: Run backup
-ssh root@proxmox-node "/usr/local/bin/pvexb-backup run"
-
-# Step 4: Power off USB drive after backup completes
-```
-
-PVEXB handles the wait-for-mount, per-VM backup, auto-unmount, and notifications. The external system only needs to handle power control and initial mount.
-
-## Retention
-
-Backup retention is controlled by the Proxmox storage definition in `/etc/pve/storage.cfg`:
+### Proxmox Configuration (`/etc/pve/storage.cfg`)
 
 ```
 dir: usb-local-backup
@@ -204,52 +93,253 @@ dir: usb-local-backup
     prune-backups keep-last=3
 ```
 
-This means `vzdump` keeps the last 3 backups per VM. Edit `keep-last` to change the retention count.
+Set `STORAGE_ID="usb-local-backup"` in `/etc/pvexb.conf` to match.
 
-## Optional Systemd Timer
-
-Home Assistant does not need to be replaced in v1. The installer does not install the systemd unit/timer and, by default, disables existing `pvexb-backup.timer` and `pvexb-backup.service` if they are present so the HA-triggered flow does not double-run.
-
-To check a Proxmox host manually:
+### Config Example (`/etc/pvexb.conf`)
 
 ```bash
-systemctl is-enabled pvexb-backup.timer pvexb-backup.service
-systemctl is-active pvexb-backup.timer pvexb-backup.service
+VM_LIST="101 106 131 103 107 104"
+MOUNT_POINT="/mnt/usb-backup"
+STORAGE_ID="usb-local-backup"
+BACKUP_MODE="suspend"
+COMPRESS="zstd"
+WAIT_SECONDS=600
+WAIT_INTERVAL=5
+MIN_FREE_GB=100
+POWER_MODE="external"
+TELEGRAM_ENABLED=true
 ```
 
-For Home Assistant-triggered mode, both should be `disabled` and `inactive`.
+### Home Assistant Triggering
 
-If you later want local monthly scheduling:
+**Recommended: mount + backup in one SSH call:**
+
+```yaml
+shell_command:
+  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'mount /dev/disk/by-uuid/<USB-UUID> /mnt/usb-backup && sleep 5 && /usr/local/bin/pvexb-backup run'"
+```
+
+Flow:
+1. HA turns on smart plug
+2. HA runs shell command (mount, settle, backup)
+3. PVEXB waits for mount (already mounted, proceeds), runs vzdump, unmounts
+4. HA turns off smart plug after its timeout
+
+**Using systemd mount unit (with hyphen escaping):**
+
+```yaml
+shell_command:
+  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'systemctl start mnt-usb\\x2dbackup.mount && sleep 10 && /usr/local/bin/pvexb-backup run'"
+```
+
+---
+
+## Setup: Network Backup
+
+### How It Works
+
+```
+Trigger (HA / cron / SSH)
+        │
+        ▼
+pvexb-backup run
+        │
+        ├── WOL to NAS (wakeonlan/etherwake)
+        │        │
+        │        ▼
+        │  ping until NAS responds
+        │  (configurable timeout)
+        │        │
+        │        ▼
+        │  mount NFS export → MOUNT_POINT
+        │        │
+        │        ▼
+        │  vzdump for each VM → NFS storage
+        │        │
+        │        ▼
+        │  unmount NFS
+        │        │
+        │        ▼
+        │  shut down NAS (SSH or custom cmd)
+        │  [only within NAS_SLEEP_WINDOW]
+```
+
+### Important: Sleep vs Shutdown
+
+On Synology and most NAS devices, there is no true "sleep" state. `synopoweroff -s` performs a **full graceful shutdown**. The terms "sleep" and "power off" are used interchangeably in this documentation — they both mean the NAS powers off completely.
+
+If your NAS already has its own schedule to power off (e.g., daily at 1:30am), set `NAS_SLEEP_MODE=disabled` and let the NAS handle its own shutdown.
+
+### NAS Preparation (Synology DSM)
+
+1. **Enable WOL:** Control Panel → Hardware & Power → General → Enable Wake on LAN
+2. **Enable NFS:** Control Panel → File Services → NFS → Enable NFS service
+3. **Create shared folder** for backups (e.g., `prox-backup-node-02`)
+4. **Set NFS permissions** on the shared folder:
+   - Hostname/IP: Proxmox node IP
+   - Privilege: Read/Write
+   - Squash: No mapping (or map to root/admin)
+   - Security: sys
+5. **Enable SSH:** Control Panel → Terminal & SNMP → Enable SSH service
+6. **Note the NAS MAC address** (Control Panel → Info Center → Network)
+
+### Proxmox Configuration (`/etc/pve/storage.cfg`)
+
+**IMPORTANT:** Do NOT define the NFS share as `nfs:` in Proxmox — this causes WebUI hangs when the NAS is off. Use a `dir:` entry pointing at the mount point. The script handles mount/unmount around each backup.
+
+Remove any existing `nfs:` entry, then add:
+
+```
+dir: prox-backup
+    path /mnt/pve/prox-backup
+    content backup
+    prune-backups keep-last=3
+    shared 0
+```
+
+When the NAS is off and NFS is unmounted, Proxmox sees an empty local directory — not a hung NFS connection.
+
+Set `STORAGE_ID="prox-backup"` in `/etc/pvexb.conf` to match.
+
+### Install Dependencies
 
 ```bash
-install -m 0644 systemd/pvexb-backup.service /etc/systemd/system/pvexb-backup.service
-install -m 0644 systemd/pvexb-backup.timer /etc/systemd/system/pvexb-backup.timer
-systemctl daemon-reload
-systemctl enable --now pvexb-backup.timer
+apt install -y nfs-common wakeonlan   # or etherwake
 ```
 
-To stop the installer from disabling systemd units during an install:
+### Config Example (`/etc/pvexb.conf`)
 
 ```bash
-PVEXB_DISABLE_SYSTEMD=false ./install.sh
+VM_LIST="101 102 103"
+MOUNT_POINT="/mnt/pve/prox-backup"
+STORAGE_ID="prox-backup"
+BACKUP_MODE="snapshot"
+COMPRESS="zstd"
+
+POWER_MODE="network"
+NAS_MAC="00:11:22:33:44:55"
+NAS_IP="192.168.68.69"
+NAS_SSH_USER="admin"
+NFS_EXPORT="/volume1/prox-backup-node-02"
+NFS_OPTIONS="soft,noatime,nofail,vers=4.1"
+NAS_SLEEP_MODE="ssh"
+NAS_SLEEP_WINDOW="Mon-Fri 01:00-07:00"
 ```
 
-## Exit Codes
+### SSH Key Setup (for NAS shutdown)
 
-- `0` - success
-- `2` - invalid command
-- `20` - config file missing
-- `21` - config invalid
-- `30` - another backup is already running
-- `31` - command power-on config missing or failed
-- `32` - unsupported power mode
-- `40` - mount timeout
-- `41` - Proxmox storage missing or unavailable
-- `42` - free-space check failed
-- `43` - free space below threshold
-- `50` - required runtime command missing, such as `vzdump`, `pvesm`, `flock`, `mountpoint`, `df`, `awk`, or `umount`
-- `60` - one or more backups or unmount failed
-- `127` - compatibility wrapper cannot find the canonical `pvexb-*` command
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/nas_key -N ""
+ssh-copy-id -i ~/.ssh/nas_key admin@192.168.68.69
+# Then set NAS_SSH_KEY="~/.ssh/nas_key" in /etc/pvexb.conf
+```
+
+### Manual Testing
+
+```bash
+# Test WOL
+wakeonlan 00:11:22:33:44:55
+ping -c 3 192.168.68.69
+
+# Test NFS mount
+mkdir -p /mnt/pve/prox-backup
+mount -t nfs 192.168.68.69:/volume1/prox-backup-node-02 /mnt/pve/prox-backup
+ls /mnt/pve/prox-backup
+umount /mnt/pve/prox-backup
+
+# Full validation
+pvexb-backup check
+```
+
+---
+
+## Reference
+
+### Commands
+
+```bash
+/usr/local/bin/pvexb-backup run        # Run backup (default action)
+/usr/local/bin/pvexb-backup check      # Validate config, check mount/storage/space (no vzdump)
+/usr/local/bin/pvexb-backup unmount    # Unmount the backup target
+/usr/local/bin/pvexb-backup version    # Show version
+```
+
+Compatibility wrappers (legacy names still work):
+- `/usr/local/bin/proxmox-usb-backup`
+- `/usr/local/bin/proxmox_usb_backup.sh`
+- `/usr/local/bin/unmount_usb_backup.sh`
+- `/usr/local/bin/send_telegram.sh`
+
+### All Config Variables
+
+**Common (both modes):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VM_LIST` | — | Space-separated VM/LXC IDs to back up |
+| `MOUNT_POINT` | `/mnt/usb-backup` | Mount point for backup target |
+| `STORAGE_ID` | `usb-local-backup` | Proxmox storage name in `/etc/pve/storage.cfg` |
+| `BACKUP_MODE` | `suspend` | vzdump mode: `snapshot`, `suspend`, or `stop` |
+| `COMPRESS` | `zstd` | Compression algorithm |
+| `WAIT_SECONDS` | `600` | Max seconds to wait for mount |
+| `WAIT_INTERVAL` | `5` | Seconds between mount check retries |
+| `MIN_FREE_GB` | `100` | Minimum free space required before backup |
+| `TELEGRAM_ENABLED` | `true` | Enable Telegram notifications |
+| `TELEGRAM_SCRIPT` | `/usr/local/bin/pvexb-send-telegram` | Path to Telegram helper |
+| `LOG_DIR` | `/var/log/pvexb` | Log directory |
+| `LOG_RETENTION_DAYS` | `180` | Days to retain log files |
+| `LOCK_FILE` | `/run/pvexb-backup.lock` | Lock file path |
+
+**Power mode:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POWER_MODE` | `external` | `external`, `command`, or `network` |
+| `POWER_ON_CMD` | — | Custom power-on command (when `POWER_MODE=command`) |
+| `POWER_OFF_CMD` | — | Custom power-off command (when `POWER_MODE=command`) |
+
+**Network mode (`POWER_MODE=network`):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NAS_MAC` | — | MAC address for WOL (required) |
+| `NAS_IP` | — | IP address of the NAS (required) |
+| `NAS_SSH_USER` | `root` | SSH user for NAS shutdown |
+| `NAS_SSH_KEY` | — | SSH private key path (optional) |
+| `NFS_EXPORT` | — | NFS export path on NAS (required) |
+| `NFS_OPTIONS` | `soft,noatime,nofail,vers=4.1` | NFS mount options |
+| `NAS_SLEEP_MODE` | `disabled` | How to shut down NAS: `disabled`, `ssh`, or `command` |
+| `NAS_SLEEP_CMD` | `synopoweroff -s` | Command to shut down NAS |
+| `NAS_SLEEP_WINDOW` | — | When to allow shutdown: `Mon-Fri 01:00-07:00`, `daily`, or empty (always) |
+| `NAS_PING_TIMEOUT` | `300` | Max seconds to wait for NAS ping response |
+| `NAS_PING_INTERVAL` | `5` | Seconds between ping retries |
+
+### Power Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `external` | External system handles power and mount | USB drive on smart plug |
+| `command` | Custom local commands via `POWER_ON_CMD` / `POWER_OFF_CMD` | Smart plug CLI, IPMI, relay |
+| `network` | Built-in WOL + NFS mount + NAS shutdown | Synology/QNAP NAS |
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `2` | Invalid command |
+| `20` | Config file missing |
+| `21` | Config invalid |
+| `30` | Another backup is already running (lock held) |
+| `31` | Power-on step failed |
+| `32` | Unsupported power mode |
+| `40` | Mount timeout / NFS mount failed |
+| `41` | Proxmox storage missing or unavailable |
+| `42` | Free-space check failed |
+| `43` | Free space below threshold |
+| `50` | Required runtime command missing |
+| `60` | One or more backups or unmount failed |
+| `127` | Compatibility wrapper cannot find canonical command |
 
 Common recovery:
 
@@ -260,237 +350,141 @@ nano /root/.pvexb.env
 /usr/local/bin/pvexb-backup check
 ```
 
-## Troubleshooting
+### Retention
 
-### USB drive is powered on but not mounted
+Controlled by `prune-backups` in `/etc/pve/storage.cfg`:
 
-PVEXB does **not** mount the drive -- it only waits for it. The drive must be mounted by something else before PVEXB runs.
+```
+dir: usb-local-backup
+    path /mnt/usb-backup
+    content backup
+    prune-backups keep-last=3
+```
+
+This keeps the last 3 backups per VM. Edit `keep-last` to change.
+
+### Optional Systemd Timer
+
+The installer disables `pvexb-backup.timer` and `pvexb-backup.service` by default so HA-triggered mode does not double-run.
+
+To enable local scheduling:
 
 ```bash
-# Check if mounted
+install -m 0644 systemd/pvexb-backup.service /etc/systemd/system/
+install -m 0644 systemd/pvexb-backup.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now pvexb-backup.timer
+```
+
+To prevent the installer from disabling systemd units:
+
+```bash
+PVEXB_DISABLE_SYSTEMD=false ./install.sh
+```
+
+### Troubleshooting
+
+**USB: Drive powered on but not mounted**
+
+PVEXB does not mount the drive — it only waits for it. Mount must happen externally.
+
+```bash
 mountpoint -q /mnt/usb-backup && echo "MOUNTED" || echo "NOT MOUNTED"
-
-# Find the USB partition and its UUID
 lsblk -f | grep -v loop
-
-# Mount manually
-mount /dev/sdX1 /mnt/usb-backup
-# Or by UUID:
 mount /dev/disk/by-uuid/<UUID> /mnt/usb-backup
 ```
 
-### Why did my backups stop working?
+**USB: Backups stopped working after power cycle**
 
-The most common reason: the USB drive was powered on but **never auto-mounted** after a power cycle. The old script only waited for the mount point -- if nothing mounted it, backups silently failed.
+Most common cause: USB drive was powered on but never auto-mounted. Include `mount` in your HA shell_command.
 
-**Fix:** ensure the drive gets mounted before PVEXB runs. The simplest approach is to include `mount` in your HA shell_command (see External Triggering above).
+**Network: NAS does not respond to WOL**
 
-### PVEXB check fails with storage error
+- Verify WOL is enabled in NAS settings
+- Check the correct MAC address (some NAS devices have multiple NICs)
+- Try `etherwake` instead of `wakeonlan` if one fails
+- Ensure the NAS and Proxmox node are on the same L2 network
 
-```bash
-pvesm status --storage usb-local-backup
-```
-
-If this fails, the Proxmox storage definition in `/etc/pve/storage.cfg` is missing or misconfigured. Ensure the `dir` storage entry exists and points to `/mnt/usb-backup`.
-
-### Low free space error
+**Network: NFS mount fails**
 
 ```bash
-df -h /mnt/usb-backup
+# Check NFS service on NAS
+showmount -e 192.168.68.69
+
+# Test mount manually with verbose output
+mount -v -t nfs 192.168.68.69:/volume1/prox-backup /mnt/pve/prox-backup
 ```
 
-PVEXB enforces `MIN_FREE_GB` (default 100GB) before starting backups. Clean old backups or reduce retention with `prune-backups` in `/etc/pve/storage.cfg`.
+**Network: Proxmox WebUI hangs**
 
-### Another backup is already running
+You have an `nfs:` entry in `/etc/pve/storage.cfg`. Remove it and replace with a `dir:` entry (see Network Setup above).
 
-PVEXB uses a lock file at `/run/pvexb-backup.lock` to prevent concurrent runs. If a previous run crashed and left a stale lock:
+**Common: Storage error**
+
+```bash
+pvesm status --storage <STORAGE_ID>
+```
+
+If this fails, check `/etc/pve/storage.cfg` — the `dir` entry must match `STORAGE_ID` in config.
+
+**Common: Low free space**
+
+```bash
+df -h <MOUNT_POINT>
+```
+
+Clean old backups or reduce `keep-last` in `storage.cfg`.
+
+**Common: Another backup is already running**
+
+Stale lock from a crashed run:
 
 ```bash
 rm -f /run/pvexb-backup.lock
 ```
 
-### Telegram notifications not working
+**Common: Telegram not working**
 
-1. Check credentials: `cat /root/.pvexb.env`
-2. Test the helper directly: `/usr/local/bin/pvexb-send-telegram "test"`
-3. Ensure `TELEGRAM_ENABLED=true` in `/etc/pvexb.conf`
-4. Check the Telegram log: `cat /var/log/pvexb/pvexb-telegram.log`
+```bash
+cat /root/.pvexb.env
+/usr/local/bin/pvexb-send-telegram "test"
+# Ensure TELEGRAM_ENABLED=true in /etc/pvexb.conf
+```
 
 ### Logs
 
 - Main log: `/var/log/pvexb/pvexb-backup.log`
 - Per-run logs: `/var/log/pvexb/<RUN-ID>-<NODE>.log`
 - Watch live: `tail -f /var/log/pvexb/pvexb-backup.log`
+- Logrotate: `/etc/logrotate.d/pvexb-backup` (6-month retention)
 
-### systemd mount unit with hyphens in path
+### systemd Mount Unit Hyphen Escaping
 
-If you use a systemd mount unit for `/mnt/usb-backup`, the unit filename **must** use `\x2d` to encode the hyphen:
+If using a systemd mount unit for `/mnt/usb-backup`, the filename must encode hyphens as `\x2d`:
 
 ```
 /etc/systemd/system/mnt-usb\x2dbackup.mount
 ```
 
-The backslash-x2d is literal in the filename. Inside the file, use the real path:
+Inside the file, use the real path: `Where=/mnt/usb-backup`.
 
-```
-Where=/mnt/usb-backup
-```
+To trigger from SSH, escape the backslash twice: `systemctl start mnt-usb\\\\x2dbackup.mount`.
 
-To trigger it from SSH/HA, escape the backslash twice:
+### File Layout
 
-```bash
-systemctl start mnt-usb\\x2dbackup.mount
-```
+| File | Purpose |
+|------|---------|
+| `bin/pvexb-backup` | Main backup runner |
+| `bin/pvexb-send-telegram` | Telegram Bot API helper |
+| `config/pvexb.conf.example` | Per-node config template |
+| `config/pvexb.env.example` | Telegram credentials template |
+| `install.sh` | Installer for Proxmox nodes |
+| `systemd/pvexb-backup.service` | Optional systemd service |
+| `systemd/pvexb-backup.timer` | Optional monthly timer |
+| `logrotate/pvexb-backup` | 6-month log rotation |
+| `tests/proxmox-docker/` | Proxmox-in-Docker test harness |
 
-## Power Modes
-
-PVEXB supports three power/backup modes via the `POWER_MODE` variable in `/etc/pvexb.conf`:
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `external` | An external system (Home Assistant, manual SSH) handles power and mount | USB drive on smart plug |
-| `command` | Custom local commands defined by `POWER_ON_CMD` / `POWER_OFF_CMD` | Smart plug via CLI, IPMI, relay |
-| `network` | Built-in WOL + NFS mount to a wakeable NAS | Synology/QNAP NAS with NFS share |
-
-### Network Backup Mode
-
-`POWER_MODE=network` allows PVEXB to back up directly to a network-attached storage device (NAS) using NFS, with automatic power management. The NAS stays asleep (saving power and reducing noise) until a backup is triggered, at which point PVEXB wakes it via Wake-on-LAN, mounts the NFS share, runs the backups, unmounts, and optionally puts the NAS back to sleep.
-
-#### Architecture
-
-```
-Trigger (HA / systemd / SSH)
-        │
-        ▼
-  SSH to Proxmox node
-        │
-        ▼
-  pvexb-backup run
-        │
-        ├── POWER_MODE=network ──► WOL to NAS (MAC: NAS_MAC)
-        │                                │
-        │                                ▼
-        │                          ping until NAS_IP responds
-        │                          (NAS_PING_TIMEOUT / NAS_PING_INTERVAL)
-        │                                │
-        │                                ▼
-        │                          mount NFS (NAS_IP:NFS_EXPORT → MOUNT_POINT)
-        │                                │
-        │                                ▼
-        │                          vzdump → NFS storage
-        │                                │
-        │                                ▼
-        │                          unmount NFS
-        │                                │
-        │                                ▼
-        │                          sleep NAS (SSH or custom cmd)
-        │                          [if within NAS_SLEEP_WINDOW]
-        │
-        └── POWER_MODE=external ───► wait for mount → vzdump → unmount
-```
-
-#### Network Config Variables
-
-| Variable | Required | Description | Example |
-|----------|----------|-------------|---------|
-| `NAS_MAC` | Yes | MAC address of NAS Ethernet port for WOL | `00:11:22:33:44:55` |
-| `NAS_IP` | Yes | IP address of the NAS | `192.168.71.50` |
-| `NAS_SSH_USER` | Optional | SSH user for NAS sleep command (default: `root`) | `admin` |
-| `NAS_SSH_KEY` | Optional | SSH private key path for NAS authentication | `~/.ssh/nas_key` |
-| `NFS_EXPORT` | Yes | NFS export path on the NAS | `/volume1/proxmox-backups` |
-| `NFS_OPTIONS` | Optional | NFS mount options (default: `soft,noatime,nofail,vers=4.1`) | `soft,timeo=30` |
-| `NAS_SLEEP_MODE` | Optional | How to sleep NAS: `disabled`, `ssh`, or `command` (default: `disabled`) | `ssh` |
-| `NAS_SLEEP_CMD` | Optional | Command to sleep NAS (default: `synopoweroff -s`) | `poweroff` |
-| `NAS_SLEEP_WINDOW` | Optional | When to allow sleep: `Mon-Fri 01:00-07:00`, `daily`, or empty (always) | `Mon-Fri 01:00-07:00` |
-| `NAS_PING_TIMEOUT` | Optional | Max seconds to wait for NAS ping (default: `300`) | `180` |
-| `NAS_PING_INTERVAL` | Optional | Seconds between ping retries (default: `5`) | `10` |
-
-#### Setup Checklist
-
-**Synology DSM (NAS side):**
-
-1. **Enable WOL:** Control Panel → Hardware & Power → General → Enable Wake on LAN (WOL)
-2. **Enable NFS:** Control Panel → File Services → NFS → Enable NFS service (v3 or v4)
-3. **Create shared folder** for backups (e.g., `proxmox-backups`)
-4. **Set NFS permissions** on the shared folder:
-   - Hostname/IP: Proxmox node IP (e.g., `192.168.71.1`)
-   - Privilege: Read/Write
-   - Squash: No mapping (or map to root/admin user)
-   - Security: sys
-5. **Enable SSH:** Control Panel → Terminal & SNMP → Enable SSH service
-6. **Note the NAS MAC address** (Control Panel → Info Center → Network)
-
-**Proxmox node side:**
-
-1. **Install dependencies:**
-   ```bash
-   apt install -y nfs-common wakeonlan   # or etherwake
-   ```
-2. **Configure `/etc/pvexb.conf`:**
-   ```bash
-   POWER_MODE="network"
-   NAS_MAC="00:11:22:33:44:55"
-   NAS_IP="192.168.71.50"
-   NAS_SSH_USER="admin"
-   NFS_EXPORT="/volume1/proxmox-backups"
-   NFS_OPTIONS="soft,noatime,nofail,vers=4.1"
-   NAS_SLEEP_MODE="ssh"
-   NAS_SLEEP_WINDOW="Mon-Fri 01:00-07:00"
-```
-3. **Set up SSH key for NAS sleep** (if using `NAS_SLEEP_MODE=ssh`):
-   ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/nas_key -N ""
-   ssh-copy-id -i ~/.ssh/nas_key admin@192.168.71.50
-   # Then set NAS_SSH_KEY="~/.ssh/nas_key" in /etc/pvexb.conf
-   ```
-4. **Test WOL manually:**
-   ```bash
-   wakeonlan 00:11:22:33:44:55
-   ping -c 3 192.168.71.50
-   ```
-5. **Test NFS mount:**
-   ```bash
-   mkdir -p /mnt/pve/prox-backup
-   mount -t nfs 192.168.71.50:/volume1/proxmox-backups /mnt/pve/prox-backup
-   ls /mnt/pve/prox-backup
-   umount /mnt/pve/prox-backup
-   ```
-6. **Configure Proxmox storage** (`/etc/pve/storage.cfg`):
-
-   **IMPORTANT:** Do NOT define the NFS share as `nfs:` in Proxmox — this will cause GUI hangs when the NAS is asleep. Use a `dir:` entry pointing at the mount point instead. The script handles mount/unmount around each backup.
-
-   If you have an existing `nfs:` entry, remove it first. Then add:
-
-   ```
-   dir: prox-backup
-       path /mnt/pve/prox-backup
-       content backup
-       prune-backups keep-last=3
-       shared 0
-   ```
-
-   Set `STORAGE_ID="prox-backup"` in `/etc/pvexb.conf` to match the storage name above.
-
-   When the NAS is asleep and the NFS is unmounted, Proxmox sees an empty local directory — not a hung NFS connection. This prevents the WebUI from freezing.
-
-7. **Run `pvexb-backup check`** to validate full configuration.
-
-### USB vs Network Backup Comparison
-
-| Feature | USB (`external`) | Network (`network`) |
-|---------|-------------------|---------------------|
-| **Target** | USB drive on smart plug | NAS via NFS |
-| **Power control** | External (HA, smart plug) | Built-in WOL |
-| **Mount type** | Local device mount | NFS network mount |
-| **Speed** | USB 3.0 (~100-500 MB/s) | Gigabit Ethernet (~100 MB/s) |
-| **Noise/Power** | Drive spins only when plug is on | NAS sleeps between backups |
-| **Setup complexity** | Low (plug + mount) | Medium (WOL + NFS + SSH) |
-| **Best for** | Single node, simple setup | Multi-node, centralized storage |
-| **Sleep support** | Via smart plug automation | Built-in NAS sleep command |
-
-## Future Enhancements
-
-Future versions may add:
+### Future Enhancements
 
 - `POWER_MODE="homeassistant"` — call Home Assistant API directly for power control
 - Multi-target backups (USB + NAS in a single run)

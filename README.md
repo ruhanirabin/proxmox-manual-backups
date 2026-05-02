@@ -112,24 +112,41 @@ TELEGRAM_ENABLED=true
 
 ### Home Assistant Triggering
 
-**Recommended: mount + backup in one SSH call:**
+**Recommended: mount + async backup (fire-and-forget):**
 
 ```yaml
 shell_command:
-  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'mount /dev/disk/by-uuid/<USB-UUID> /mnt/usb-backup && sleep 5 && /usr/local/bin/pvexb-backup run'"
+  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'mount /dev/disk/by-uuid/<USB-UUID> /mnt/usb-backup && sleep 5 && nohup /usr/local/bin/pvexb-backup run > /dev/null 2>&1 &'"
 ```
+
+**Why async?** The HA `shell_command` service has a ~60-second timeout. Multi-VM backups take longer. The `nohup ... &` pattern:
+- Mount is synchronous (returns only after mount succeeds)
+- Backup starts in the background and the SSH call returns immediately
+- HA does not timeout waiting for the backup to complete
+- PVEXB handles locking so concurrent runs are prevented
+- The smart plug power-off delay must be long enough to cover the full backup + unmount window
 
 Flow:
 1. HA turns on smart plug
-2. HA runs shell command (mount, settle, backup)
-3. PVEXB waits for mount (already mounted, proceeds), runs vzdump, unmounts
-4. HA turns off smart plug after its timeout
+2. HA mounts the drive (synchronous)
+3. HA fires backup in background, gets instant success response
+4. HA starts its power-off delay timer
+5. PVEXB waits for mount (already done), runs vzdump, unmounts, notifies via Telegram
+6. HA turns off smart plug after its delay timer
+
+**Alternative: mount separately, then fire backup**
+
+```yaml
+shell_command:
+  pvexb_mount: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'mount /dev/disk/by-uuid/<USB-UUID> /mnt/usb-backup'"
+  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'nohup /usr/local/bin/pvexb-backup run > /dev/null 2>&1 &'"
+```
 
 **Using systemd mount unit (with hyphen escaping):**
 
 ```yaml
 shell_command:
-  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'systemctl start mnt-usb\\x2dbackup.mount && sleep 10 && /usr/local/bin/pvexb-backup run'"
+  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'systemctl start mnt-usb\\x2dbackup.mount && sleep 10 && nohup /usr/local/bin/pvexb-backup run > /dev/null 2>&1 &'"
 ```
 
 ---

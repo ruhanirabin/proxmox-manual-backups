@@ -2,6 +2,12 @@
 
 All notable changes follow Semantic Versioning.
 
+## [1.0.1] - 2026-05-02
+
+### Changed
+- Home Assistant `shell_command` examples now use `nohup ... &` for fire-and-forget
+  async backup execution to avoid HA's ~60s command timeout on multi-VM backups
+
 ## [1.0.0] - 2026-05-02
 
 ### Added

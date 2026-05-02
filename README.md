@@ -1,6 +1,6 @@
-# PVEXB Proxmox USB Backup
+# PVEXB Proxmox Network/USB Backup Script
 
-Reusable Bash tooling for Proxmox backups with Home Assistant-compatible triggering, per-node configuration, logging, and Telegram notifications. Supports both USB external drive and network/NAS backup targets.
+Reusable Bash tooling for Proxmox backups with Home Assistant-compatible triggering, per-node configuration, logging, and Telegram notifications. Supports both USB external drive and network/NAS backup targets. It is possible to make it work together from Cron, HomeAssistant Trigger, and SSH. Recently implemented WOL for NAS based solutions.
 
 `pvexb-` is the canonical prefix for installed files to reduce naming conflicts on shared Proxmox hosts.
 

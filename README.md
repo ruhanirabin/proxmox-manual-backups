@@ -1,6 +1,6 @@
 # PVEXB Proxmox USB Backup
 
-Reusable Bash tooling for Proxmox USB backups with Home Assistant-compatible triggering, per-node configuration, logging, and Telegram notifications.
+Reusable Bash tooling for Proxmox backups with Home Assistant-compatible triggering, per-node configuration, logging, and Telegram notifications. Supports both USB external drive and network/NAS backup targets.
 
 `pvexb-` is the canonical prefix for installed files to reduce naming conflicts on shared Proxmox hosts.
 
@@ -17,7 +17,7 @@ This keeps the existing Home Assistant flow intact:
 5. The script unmounts the USB drive.
 6. Home Assistant turns off the plug after its existing timeout window.
 
-The default `POWER_MODE="external"` means Home Assistant or another external automation owns power control.
+The default `POWER_MODE="external"` means Home Assistant or another external automation owns power control. Set `POWER_MODE="network"` to use a WOL-capable NAS with NFS instead.
 
 ## Canonical Names
 
@@ -342,14 +342,136 @@ To trigger it from SSH/HA, escape the backslash twice:
 systemctl start mnt-usb\\x2dbackup.mount
 ```
 
-## Future Power Control
+## Power Modes
 
-The config already reserves power-control settings:
+PVEXB supports three power/backup modes via the `POWER_MODE` variable in `/etc/pvexb.conf`:
 
-```bash
-POWER_MODE="external"
-POWER_ON_CMD=""
-POWER_OFF_CMD=""
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `external` | An external system (Home Assistant, manual SSH) handles power and mount | USB drive on smart plug |
+| `command` | Custom local commands defined by `POWER_ON_CMD` / `POWER_OFF_CMD` | Smart plug via CLI, IPMI, relay |
+| `network` | Built-in WOL + NFS mount to a wakeable NAS | Synology/QNAP NAS with NFS share |
+
+### Network Backup Mode
+
+`POWER_MODE=network` allows PVEXB to back up directly to a network-attached storage device (NAS) using NFS, with automatic power management. The NAS stays asleep (saving power and reducing noise) until a backup is triggered, at which point PVEXB wakes it via Wake-on-LAN, mounts the NFS share, runs the backups, unmounts, and optionally puts the NAS back to sleep.
+
+#### Architecture
+
+```
+Trigger (HA / systemd / SSH)
+        │
+        ▼
+  SSH to Proxmox node
+        │
+        ▼
+  pvexb-backup run
+        │
+        ├── POWER_MODE=network ──► WOL to NAS (MAC: NAS_MAC)
+        │                                │
+        │                                ▼
+        │                          ping until NAS_IP responds
+        │                          (NAS_PING_TIMEOUT / NAS_PING_INTERVAL)
+        │                                │
+        │                                ▼
+        │                          mount NFS (NAS_IP:NFS_EXPORT → MOUNT_POINT)
+        │                                │
+        │                                ▼
+        │                          vzdump → NFS storage
+        │                                │
+        │                                ▼
+        │                          unmount NFS
+        │                                │
+        │                                ▼
+        │                          sleep NAS (SSH or custom cmd)
+        │                          [if within NAS_SLEEP_WINDOW]
+        │
+        └── POWER_MODE=external ───► wait for mount → vzdump → unmount
 ```
 
-For v1, keep `external`. A later version can implement `POWER_MODE="homeassistant"` to call the Home Assistant API directly, or `POWER_MODE="command"` for local smart-plug commands.
+#### Network Config Variables
+
+| Variable | Required | Description | Example |
+|----------|----------|-------------|---------|
+| `NAS_MAC` | Yes | MAC address of NAS Ethernet port for WOL | `00:11:22:33:44:55` |
+| `NAS_IP` | Yes | IP address of the NAS | `192.168.71.50` |
+| `NAS_SSH_USER` | Optional | SSH user for NAS sleep command (default: `root`) | `admin` |
+| `NFS_EXPORT` | Yes | NFS export path on the NAS | `/volume1/proxmox-backups` |
+| `NFS_OPTIONS` | Optional | NFS mount options (default: `nolock,soft,timeo=30`) | `nolock,soft,timeo=30` |
+| `NAS_SLEEP_MODE` | Optional | How to sleep the NAS: `ssh` or `custom` (default: `ssh`) | `ssh` |
+| `NAS_SLEEP_CMD` | Optional | Custom command to sleep NAS (used when `NAS_SLEEP_MODE=custom`) | `curl http://nas/sleep` |
+| `NAS_SLEEP_WINDOW` | Optional | Cron expression for when NAS sleep is allowed | `0 1 * * 1-5` |
+| `NAS_PING_TIMEOUT` | Optional | Max seconds to wait for NAS to respond to ping (default: `120`) | `180` |
+| `NAS_PING_INTERVAL` | Optional | Seconds between ping retries (default: `5`) | `10` |
+
+#### Setup Checklist
+
+**Synology DSM (NAS side):**
+
+1. **Enable WOL:** Control Panel → Hardware & Power → General → Enable Wake on LAN (WOL)
+2. **Enable NFS:** Control Panel → File Services → NFS → Enable NFS service (v3 or v4)
+3. **Create shared folder** for backups (e.g., `proxmox-backups`)
+4. **Set NFS permissions** on the shared folder:
+   - Hostname/IP: Proxmox node IP (e.g., `192.168.71.1`)
+   - Privilege: Read/Write
+   - Squash: No mapping (or map to root/admin user)
+   - Security: sys
+5. **Enable SSH:** Control Panel → Terminal & SNMP → Enable SSH service
+6. **Note the NAS MAC address** (Control Panel → Info Center → Network)
+
+**Proxmox node side:**
+
+1. **Install dependencies:**
+   ```bash
+   apt install -y nfs-common wakeonlan   # or etherwake
+   ```
+2. **Configure `/etc/pvexb.conf`:**
+   ```bash
+   POWER_MODE="network"
+   NAS_MAC="00:11:22:33:44:55"
+   NAS_IP="192.168.71.50"
+   NAS_SSH_USER="admin"
+   NFS_EXPORT="/volume1/proxmox-backups"
+   NFS_OPTIONS="nolock,soft,timeo=30"
+   NAS_SLEEP_MODE="ssh"
+   NAS_SLEEP_WINDOW="0 1 * * 1-5"
+   ```
+3. **Set up SSH key for NAS sleep** (if using `NAS_SLEEP_MODE=ssh`):
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/nas_key -N ""
+   ssh-copy-id -i ~/.ssh/nas_key admin@192.168.71.50
+   ```
+4. **Test WOL manually:**
+   ```bash
+   wakeonlan 00:11:22:33:44:55
+   ping -c 3 192.168.71.50
+   ```
+5. **Test NFS mount:**
+   ```bash
+   mount -t nfs 192.168.71.50:/volume1/proxmox-backups /mnt/usb-backup
+   ls /mnt/usb-backup
+   umount /mnt/usb-backup
+   ```
+6. **Run `pvexb-backup check`** to validate full configuration.
+
+### USB vs Network Backup Comparison
+
+| Feature | USB (`external`) | Network (`network`) |
+|---------|-------------------|---------------------|
+| **Target** | USB drive on smart plug | NAS via NFS |
+| **Power control** | External (HA, smart plug) | Built-in WOL |
+| **Mount type** | Local device mount | NFS network mount |
+| **Speed** | USB 3.0 (~100-500 MB/s) | Gigabit Ethernet (~100 MB/s) |
+| **Noise/Power** | Drive spins only when plug is on | NAS sleeps between backups |
+| **Setup complexity** | Low (plug + mount) | Medium (WOL + NFS + SSH) |
+| **Best for** | Single node, simple setup | Multi-node, centralized storage |
+| **Sleep support** | Via smart plug automation | Built-in NAS sleep command |
+
+## Future Enhancements
+
+Future versions may add:
+
+- `POWER_MODE="homeassistant"` — call Home Assistant API directly for power control
+- Multi-target backups (USB + NAS in a single run)
+- Backup verification and integrity checks
+- Automatic NAS health monitoring (SMART, disk space alerts)

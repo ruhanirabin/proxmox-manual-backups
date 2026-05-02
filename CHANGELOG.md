@@ -2,6 +2,29 @@
 
 All notable changes follow Semantic Versioning.
 
+## [1.0.0] - 2026-05-02
+
+### Added
+- **POWER_MODE=network**: Support for NFS-based backups to a sleeping/wakeable NAS
+  - WOL (Wake-on-LAN) to power on NAS before backup
+  - Automatic NFS mount/unmount around backup window
+  - Configurable NAS sleep after backup (SSH or custom command)
+  - Sleep window scheduling (e.g., weekdays 1AM-7AM only)
+  - New config variables: NAS_MAC, NAS_IP, NAS_SSH_USER, NFS_EXPORT, NFS_OPTIONS,
+    NAS_SLEEP_MODE, NAS_SLEEP_CMD, NAS_SLEEP_WINDOW, NAS_PING_TIMEOUT, NAS_PING_INTERVAL
+- Network dependency checks in install.sh (wakeonlan/etherwake, nfs-common)
+- Network config section in pvexb.conf.example
+
+### Changed
+- POWER_MODE validation now accepts: external, command, network
+- vzdump output now always logged to run log (removed --quiet flag)
+- Version bump to 1.0.0 for new network backup architecture
+
+### Compatibility
+- POWER_MODE=external (USB) flow is fully unchanged -- existing node-01 setups continue to work
+- All existing config variables, file names, and commands remain the same
+- install.sh preserves existing config files and creates backups of legacy files
+
 ## [0.7.8] - 2026-05-01
 
 - Added comprehensive troubleshooting section to README covering: mount failures, silent backup detection, storage errors, low free space, stale locks, Telegram issues, systemd hyphen escaping, and log locations.

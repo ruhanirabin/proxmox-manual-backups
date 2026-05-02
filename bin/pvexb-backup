@@ -64,6 +64,11 @@ Usage:
   $APP_NAME unmount
   $APP_NAME version
 
+POWER_MODE: external (default), command, network, homeassistant (reserved)
+  external — Home Assistant or another controller manages USB power/mount
+  command  — custom POWER_ON_CMD / POWER_OFF_CMD scripts
+  network  — WOL to wake NAS, NFS mount for backup, SSH to sleep NAS
+
 Environment:
   PVEXB_CONFIG=/path/to/config
   PROXMOX_USB_BACKUP_CONFIG=/path/to/config  (legacy)
@@ -202,6 +207,18 @@ load_config() {
   POWER_ON_CMD="${POWER_ON_CMD:-}"
   POWER_OFF_CMD="${POWER_OFF_CMD:-}"
 
+  NAS_MAC="${NAS_MAC:-}"
+  NAS_IP="${NAS_IP:-}"
+  NAS_SSH_USER="${NAS_SSH_USER:-root}"
+  NAS_SSH_KEY="${NAS_SSH_KEY:-}"
+  NFS_EXPORT="${NFS_EXPORT:-}"
+  NFS_OPTIONS="${NFS_OPTIONS:-soft,noatime,nofail,vers=4.1}"
+  NAS_SLEEP_MODE="${NAS_SLEEP_MODE:-disabled}"
+  NAS_SLEEP_CMD="${NAS_SLEEP_CMD:-synopoweroff -s}"
+  NAS_SLEEP_WINDOW="${NAS_SLEEP_WINDOW:-}"
+  NAS_PING_TIMEOUT="${NAS_PING_TIMEOUT:-300}"
+  NAS_PING_INTERVAL="${NAS_PING_INTERVAL:-5}"
+
   ensure_log_dir
 }
 
@@ -234,12 +251,45 @@ validate_config() {
   esac
 
   case "$POWER_MODE" in
-    external|command|homeassistant) ;;
+    external|command|homeassistant|network) ;;
     *)
       log "ERROR" "Invalid POWER_MODE: $POWER_MODE"
       errors=$((errors + 1))
       ;;
   esac
+
+  # Network-mode specific validation
+  if [ "$POWER_MODE" = "network" ]; then
+    if [ -z "$NAS_MAC" ] && [ -z "$NAS_IP" ]; then
+      log "ERROR" "POWER_MODE=network requires NAS_MAC and/or NAS_IP"
+      errors=$((errors + 1))
+    fi
+    if [ -n "$NAS_MAC" ] && [ -z "$NAS_IP" ]; then
+      log "ERROR" "POWER_MODE=network with NAS_MAC set requires NAS_IP for ping/mount"
+      errors=$((errors + 1))
+    fi
+    if [ -n "$NAS_IP" ] && [ -z "$NFS_EXPORT" ]; then
+      log "ERROR" "POWER_MODE=network with NAS_IP set requires NFS_EXPORT"
+      errors=$((errors + 1))
+    fi
+    if ! [[ "$NAS_PING_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$NAS_PING_TIMEOUT" -lt 1 ]; then
+      log "ERROR" "NAS_PING_TIMEOUT must be a positive integer"
+      errors=$((errors + 1))
+    fi
+    if ! [[ "$NAS_PING_INTERVAL" =~ ^[0-9]+$ ]] || [ "$NAS_PING_INTERVAL" -lt 1 ]; then
+      log "ERROR" "NAS_PING_INTERVAL must be a positive integer"
+      errors=$((errors + 1))
+    fi
+    if [ -n "$NAS_SLEEP_MODE" ]; then
+      case "$NAS_SLEEP_MODE" in
+        disabled|ssh|command) ;;
+        *)
+          log "ERROR" "NAS_SLEEP_MODE must be one of: disabled, ssh, command (got: $NAS_SLEEP_MODE)"
+          errors=$((errors + 1))
+          ;;
+      esac
+    fi
+  fi
 
   if ! [[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || [ "$WAIT_SECONDS" -lt 1 ]; then
     log "ERROR" "WAIT_SECONDS must be a positive integer"
@@ -286,6 +336,16 @@ validate_runtime_dependencies() {
       require_runtime_command umount "Install util-linux or run on a standard Proxmox host." || return $?
       require_runtime_command pvesm "Run this on a Proxmox host; pvesm is required to validate storage." || return $?
       require_runtime_command vzdump "Run this on a Proxmox host; vzdump is required for backups." || return $?
+
+      # Network mode: need WOL tool and NFS mount capability
+      if [ "$POWER_MODE" = "network" ]; then
+        if ! command -v wakeonlan >/dev/null 2>&1 && ! command -v etherwake >/dev/null 2>&1; then
+          log "ERROR" "Missing required command: wakeonlan or etherwake. Install wakeonlan or etherwake for WOL."
+          notify "ERROR" "$APP_NAME dependency missing" "Missing required command: wakeonlan or etherwake. Install wakeonlan or etherwake for WOL."
+          return 50
+        fi
+        require_runtime_command mount "Install util-linux or run on a standard Proxmox host." || return $?
+      fi
       ;;
     check)
       require_runtime_command pvesm "Run this on a Proxmox host; pvesm is required to validate storage." || return $?
@@ -346,6 +406,33 @@ run_power_on() {
       notify "ERROR" "$APP_NAME unsupported power mode" "POWER_MODE=homeassistant is not implemented in this version."
       return 32
       ;;
+    network)
+      if [ -z "$NAS_IP" ] || [ -z "$NAS_MAC" ]; then
+        log "ERROR" "POWER_MODE=network requires NAS_MAC and NAS_IP"
+        notify "ERROR" "$APP_NAME power-on failed" "NAS_MAC and NAS_IP must be configured."
+        return 31
+      fi
+      log "INFO" "Sending WOL to NAS ($NAS_MAC)..."
+      wakeonlan "$NAS_MAC" 2>/dev/null || etherwake "$NAS_MAC" 2>/dev/null || {
+        log "ERROR" "Both wakeonlan and etherwake failed for $NAS_MAC"
+        notify "ERROR" "$APP_NAME wake failed" "Cannot send WOL to $NAS_MAC. Install wakeonlan or etherwake."
+        return 31
+      }
+      log "INFO" "Waiting for NAS to respond to ping ($NAS_IP, timeout ${NAS_PING_TIMEOUT}s)..."
+      local waited=0
+      while [ "$waited" -lt "$NAS_PING_TIMEOUT" ]; do
+        if ping -c 1 -W 2 "$NAS_IP" >/dev/null 2>&1; then
+          log "INFO" "NAS responded to ping after ${waited}s"
+          sleep 10
+          return 0
+        fi
+        sleep "$NAS_PING_INTERVAL"
+        waited=$((waited + NAS_PING_INTERVAL))
+      done
+      log "ERROR" "NAS did not respond to ping within ${NAS_PING_TIMEOUT}s"
+      notify "ERROR" "$APP_NAME wake timeout" "NAS $NAS_IP did not respond within ${NAS_PING_TIMEOUT}s."
+      return 31
+      ;;
   esac
 }
 
@@ -370,7 +457,100 @@ run_power_off() {
     homeassistant)
       return 0
       ;;
+    network)
+      return 0
+      ;;
   esac
+}
+
+run_mount_nfs() {
+  if [ "$POWER_MODE" != "network" ]; then
+    return 0
+  fi
+
+  if mountpoint -q "$MOUNT_POINT"; then
+    log "INFO" "NFS already mounted at $MOUNT_POINT"
+    return 0
+  fi
+
+  log "INFO" "Mounting NFS ${NAS_IP}:${NFS_EXPORT} -> $MOUNT_POINT"
+  mount -t nfs "${NAS_IP}:${NFS_EXPORT}" "$MOUNT_POINT" -o "$NFS_OPTIONS" || {
+    log "ERROR" "NFS mount failed: ${NAS_IP}:${NFS_EXPORT}"
+    notify "ERROR" "$APP_NAME mount failed" "Cannot mount ${NAS_IP}:${NFS_EXPORT} at $MOUNT_POINT. Check NFS_OPTIONS."
+    return 40
+  }
+
+  log "INFO" "NFS mounted successfully at $MOUNT_POINT"
+  return 0
+}
+
+run_sleep_nas() {
+  if [ "$POWER_MODE" != "network" ]; then
+    return 0
+  fi
+
+  if [ "$NAS_SLEEP_MODE" = "disabled" ]; then
+    log "INFO" "NAS sleep mode is disabled; leaving NAS awake"
+    return 0
+  fi
+
+  # Check sleep window if configured (format: "Mon-Fri 01:00-07:00" or "daily")
+  if [ -n "$NAS_SLEEP_WINDOW" ] && [ "$NAS_SLEEP_WINDOW" != "daily" ]; then
+    local day_of_week hour
+    day_of_week=$(date +%u)
+    hour=$(date +%H)
+
+    # Parse window like "Mon-Fri 01:00-07:00"
+    local days_part hours_part
+    days_part=$(echo "$NAS_SLEEP_WINDOW" | awk '{print $1}')
+    hours_part=$(echo "$NAS_SLEEP_WINDOW" | awk '{print $2}')
+
+    local in_window=false
+
+    case "$days_part" in
+      daily) in_window=true ;;
+      Mon-Fri) [ "$day_of_week" -ge 1 ] && [ "$day_of_week" -le 5 ] && in_window=true ;;
+      Sat-Sun) [ "$day_of_week" -ge 6 ] && [ "$day_of_week" -le 7 ] && in_window=true ;;
+      *) in_window=true ;;
+    esac
+
+    if [ "$in_window" = "true" ] && [ -n "$hours_part" ]; then
+      local start_hour end_hour
+      start_hour=$(echo "$hours_part" | cut -d: -f1 | sed 's/[^0-9]//g')
+      end_hour=$(echo "$hours_part" | cut -d- -f2 | cut -d: -f1 | sed 's/[^0-9]//g')
+      if [ "$hour" -ge "$start_hour" ] && [ "$hour" -lt "$end_hour" ]; then
+        in_window=true
+      else
+        in_window=false
+      fi
+    fi
+
+    if [ "$in_window" != "true" ]; then
+      log "INFO" "Outside NAS sleep window ($NAS_SLEEP_WINDOW); leaving NAS awake"
+      return 0
+    fi
+  fi
+
+  case "$NAS_SLEEP_MODE" in
+    ssh)
+      local ssh_opts="-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+      [ -n "$NAS_SSH_KEY" ] && ssh_opts="$ssh_opts -i $NAS_SSH_KEY"
+      log "INFO" "Sending NAS to sleep via SSH (${NAS_SSH_USER}@${NAS_IP})..."
+      ssh $ssh_opts "${NAS_SSH_USER}@${NAS_IP}" "$NAS_SLEEP_CMD" 2>/dev/null || {
+        log "WARN" "NAS sleep SSH command failed (NAS may already be off)"
+      }
+      ;;
+    command)
+      if [ -z "$NAS_SLEEP_CMD" ]; then
+        log "WARN" "NAS_SLEEP_MODE=command but NAS_SLEEP_CMD is empty"
+        return 0
+      fi
+      log "INFO" "Running NAS sleep command: $NAS_SLEEP_CMD"
+      bash -c "$NAS_SLEEP_CMD" || log "WARN" "NAS sleep command failed"
+      ;;
+  esac
+
+  return 0
 }
 
 wait_for_mount() {
@@ -474,12 +654,22 @@ run_backup() {
   prune_logs
   acquire_lock || return $?
 
-  notify "INFO" "$APP_NAME started" "Backup run $RUN_ID started. Guests: ${VM_IDS[*]}. Storage: $STORAGE_ID. Mount: $MOUNT_POINT."
+  notify "INFO" "$APP_NAME started" "Backup run $RUN_ID started. Mode: $POWER_MODE. Guests: ${VM_IDS[*]}. Storage: $STORAGE_ID. Mount: $MOUNT_POINT."
 
   run_power_on
   local rc=$?
   if [ "$rc" -ne 0 ]; then
     log "ERROR" "Power-on step failed with exit code $rc"
+    return "$rc"
+  fi
+
+  # Network mode: mount NFS after wake
+  run_mount_nfs
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$POWER_MODE" != "external" ]; then
+      run_power_off || true
+    fi
     return "$rc"
   fi
 
@@ -510,6 +700,11 @@ run_backup() {
   local unmount_rc=$?
   if [ "$unmount_rc" -eq 0 ]; then
     run_power_off || log "WARN" "Power-off command failed with exit code $?"
+  fi
+
+  # Network mode: sleep NAS after unmount
+  if [ "$POWER_MODE" = "network" ]; then
+    run_sleep_nas
   fi
 
   local end_ts duration summary_level result_text free_after

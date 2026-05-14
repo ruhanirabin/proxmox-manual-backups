@@ -171,10 +171,13 @@ pvexb-backup run
         │  mount NFS export → MOUNT_POINT
         │        │
         │        ▼
+        │  enable Proxmox storage (optional idle-disable)
+        │        │
+        │        ▼
         │  vzdump for each VM → NFS storage
         │        │
         │        ▼
-        │  unmount NFS
+        │  unmount NFS + disable storage again
         │        │
         │        ▼
         │  shut down NAS (SSH or custom cmd)
@@ -208,13 +211,17 @@ Remove any existing `nfs:` entry, then add:
 
 ```
 dir: prox-backup
+    disable
     path /mnt/pve/prox-backup
     content backup
+    is_mountpoint 1
     prune-backups keep-last=3
     shared 0
 ```
 
-When the NAS is off and NFS is unmounted, Proxmox sees an empty local directory — not a hung NFS connection.
+`disable` is the recommended idle state for on-demand NAS storage. The script enables the storage after NFS mounts and disables it again after unmounting when `NETWORK_STORAGE_DISABLE_IDLE=true` (default). `is_mountpoint 1` prevents Proxmox from writing backups to the host root filesystem if the NFS mount is absent.
+
+When the NAS is off and NFS is unmounted, Proxmox sees a disabled local directory — not a hung NFS connection and not a log-spamming enabled storage.
 
 Set `STORAGE_ID="prox-backup"` in `/etc/pvexb.conf` to match.
 
@@ -239,6 +246,7 @@ NAS_IP="192.168.68.69"
 NAS_SSH_USER="admin"
 NFS_EXPORT="/volume1/prox-backup-node-02"
 NFS_OPTIONS="soft,noatime,nofail,vers=4.1"
+NETWORK_STORAGE_DISABLE_IDLE=true
 NAS_SLEEP_MODE="ssh"
 NAS_SLEEP_WINDOW="Mon-Fri 01:00-07:00"
 ```
@@ -264,8 +272,8 @@ mount -t nfs 192.168.68.69:/volume1/prox-backup-node-02 /mnt/pve/prox-backup
 ls /mnt/pve/prox-backup
 umount /mnt/pve/prox-backup
 
-# Full validation
-pvexb-backup check
+# Full network-mode validation (wakes/mounts/runs/unmounts)
+pvexb-backup run
 ```
 
 ---
@@ -325,6 +333,7 @@ Compatibility wrappers (legacy names still work):
 | `NAS_SSH_KEY` | — | SSH private key path (optional) |
 | `NFS_EXPORT` | — | NFS export path on NAS (required) |
 | `NFS_OPTIONS` | `soft,noatime,nofail,vers=4.1` | NFS mount options |
+| `NETWORK_STORAGE_DISABLE_IDLE` | `true` | In network mode, enable Proxmox storage only during backup and disable it after unmount to avoid `pvestatd` warning spam while preserving `is_mountpoint 1` safety |
 | `NAS_SLEEP_MODE` | `disabled` | How to shut down NAS: `disabled`, `ssh`, or `command` |
 | `NAS_SLEEP_CMD` | `synopoweroff -s` | Command to shut down NAS |
 | `NAS_SLEEP_WINDOW` | — | When to allow shutdown: `Mon-Fri 01:00-07:00`, `daily`, or empty (always) |

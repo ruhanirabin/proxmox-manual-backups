@@ -50,6 +50,7 @@ NAS_SSH_KEY=""                       # Optional: SSH private key path
 # NFS settings
 NFS_EXPORT=""                        # NFS export path, e.g. /volume1/prox-backup-node-02
 NFS_OPTIONS="soft,noatime,nofail,vers=4.1"  # NFS mount options
+NETWORK_STORAGE_DISABLE_IDLE=true    # Disable Proxmox storage outside backup window to avoid pvestatd warnings
 
 # NAS sleep settings
 NAS_SLEEP_MODE="disabled"            # disabled | ssh | command

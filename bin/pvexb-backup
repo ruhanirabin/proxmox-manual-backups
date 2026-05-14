@@ -709,6 +709,7 @@ run_backup() {
   preflight
   rc=$?
   if [ "$rc" -ne 0 ]; then
+    set_backup_storage_enabled 1
     if [ "$POWER_MODE" != "external" ]; then
       run_power_off || true
     fi

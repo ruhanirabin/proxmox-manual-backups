@@ -2,6 +2,19 @@
 
 All notable changes follow Semantic Versioning.
 
+## [1.0.2] - 2026-05-14
+
+### Added
+- `NETWORK_STORAGE_DISABLE_IDLE=true` for `POWER_MODE=network`: PVEXB now enables the
+  Proxmox storage after the NFS mount succeeds and disables it again after unmount.
+  This avoids `pvestatd` warning spam for on-demand NAS storage while preserving
+  `is_mountpoint 1` protection against accidental local-root backup writes.
+
+### Changed
+- Network backup documentation now recommends `disable` + `is_mountpoint 1` for
+  NAS-backed `dir` storage and clarifies that `pvexb-backup run` is the full
+  network-mode validation path.
+
 ## [1.0.1] - 2026-05-02
 
 ### Changed

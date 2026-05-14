@@ -213,6 +213,7 @@ load_config() {
   NAS_SSH_KEY="${NAS_SSH_KEY:-}"
   NFS_EXPORT="${NFS_EXPORT:-}"
   NFS_OPTIONS="${NFS_OPTIONS:-soft,noatime,nofail,vers=4.1}"
+  NETWORK_STORAGE_DISABLE_IDLE="${NETWORK_STORAGE_DISABLE_IDLE:-true}"
   NAS_SLEEP_MODE="${NAS_SLEEP_MODE:-disabled}"
   NAS_SLEEP_CMD="${NAS_SLEEP_CMD:-synopoweroff -s}"
   NAS_SLEEP_WINDOW="${NAS_SLEEP_WINDOW:-}"
@@ -280,6 +281,13 @@ validate_config() {
       log "ERROR" "NAS_PING_INTERVAL must be a positive integer"
       errors=$((errors + 1))
     fi
+    case "$NETWORK_STORAGE_DISABLE_IDLE" in
+      true|false) ;;
+      *)
+        log "ERROR" "NETWORK_STORAGE_DISABLE_IDLE must be true or false (got: $NETWORK_STORAGE_DISABLE_IDLE)"
+        errors=$((errors + 1))
+        ;;
+    esac
     if [ -n "$NAS_SLEEP_MODE" ]; then
       case "$NAS_SLEEP_MODE" in
         disabled|ssh|command) ;;
@@ -578,6 +586,29 @@ check_storage() {
   fi
 }
 
+set_backup_storage_enabled() {
+  local desired="$1"  # 0=enabled, 1=disabled
+
+  if [ "$POWER_MODE" != "network" ] || [ "$NETWORK_STORAGE_DISABLE_IDLE" != "true" ]; then
+    return 0
+  fi
+
+  if [ -z "${STORAGE_ID:-}" ]; then
+    return 0
+  fi
+
+  pvesm set "$STORAGE_ID" --disable "$desired" >/dev/null 2>&1 || {
+    log "WARN" "Unable to set Proxmox storage $STORAGE_ID disable=$desired"
+    return 0
+  }
+
+  if [ "$desired" = "0" ]; then
+    log "INFO" "Enabled Proxmox storage $STORAGE_ID for backup run"
+  else
+    log "INFO" "Disabled Proxmox storage $STORAGE_ID outside backup window"
+  fi
+}
+
 check_free_space() {
   local available_kb available_gb
   available_kb="$(df -Pk "$MOUNT_POINT" 2>/dev/null | awk 'NR==2 {print $4}')"
@@ -673,6 +704,8 @@ run_backup() {
     return "$rc"
   fi
 
+  set_backup_storage_enabled 0
+
   preflight
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -704,6 +737,9 @@ run_backup() {
 
   # Network mode: sleep NAS after unmount
   if [ "$POWER_MODE" = "network" ]; then
+    if [ "$unmount_rc" -eq 0 ]; then
+      set_backup_storage_enabled 1
+    fi
     run_sleep_nas
   fi
 

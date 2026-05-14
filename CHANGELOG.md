@@ -2,6 +2,13 @@
 
 All notable changes follow Semantic Versioning.
 
+## [1.0.3] - 2026-05-14
+
+### Fixed
+- Disable `POWER_MODE=network` Proxmox storage again when preflight fails after
+  temporary storage enablement. This prevents NAS-backed storage from staying
+  enabled after low-free-space or storage validation failures.
+
 ## [1.0.2] - 2026-05-14
 
 ### Added

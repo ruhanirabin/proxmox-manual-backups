@@ -72,6 +72,7 @@ preflight_installer() {
   require_file "$VERSION_FILE"
   require_file bin/pvexb-backup
   require_file bin/pvexb-send-telegram
+  require_file bin/pvexb-usb-launcher
   require_file bin/proxmox-usb-backup
   require_file bin/proxmox_usb_backup.sh
   require_file bin/unmount_usb_backup.sh
@@ -79,6 +80,9 @@ preflight_installer() {
   require_file config/pvexb.conf.example
   require_file config/pvexb.env.example
   require_file logrotate/pvexb-backup
+  require_file systemd/pvexb-backup.service
+  require_file systemd/pvexb-usb-backup.service
+  require_file systemd/pvexb-backup.timer
 }
 
 backup_existing_file() {
@@ -267,6 +271,11 @@ disable_systemd_units_for_ha_mode() {
     systemctl disable --now pvexb-backup.service >/dev/null 2>&1 || true
     echo "Ensured pvexb-backup.service is disabled for Home Assistant-triggered mode."
   fi
+
+  if systemctl list-unit-files pvexb-usb-backup.service >/dev/null 2>&1; then
+    systemctl disable --now pvexb-usb-backup.service >/dev/null 2>&1 || true
+    echo "Ensured pvexb-usb-backup.service is disabled for Home Assistant-triggered mode."
+  fi
 }
 
 preflight_installer
@@ -283,6 +292,7 @@ backup_existing_file "$PREFIX/send_telegram.sh"
 
 install -m 0755 bin/pvexb-backup "$PREFIX/pvexb-backup"
 install -m 0755 bin/pvexb-send-telegram "$PREFIX/pvexb-send-telegram"
+install -m 0755 bin/pvexb-usb-launcher "$PREFIX/pvexb-usb-launcher"
 
 if [ ! -f "$CONFIG_FILE" ] && [ -f "$LEGACY_CONFIG_FILE" ]; then
   install -m 0644 "$LEGACY_CONFIG_FILE" "$CONFIG_FILE"
@@ -308,6 +318,11 @@ install -m 0755 bin/unmount_usb_backup.sh "$PREFIX/unmount_usb_backup.sh"
 
 install -d "$LOGROTATE_DIR"
 install -m 0644 logrotate/pvexb-backup "$LOGROTATE_DIR/pvexb-backup"
+
+# Install systemd units (disabled by default for HA mode)
+install -m 0644 systemd/pvexb-backup.service /etc/systemd/system/pvexb-backup.service
+install -m 0644 systemd/pvexb-usb-backup.service /etc/systemd/system/pvexb-usb-backup.service
+install -m 0644 systemd/pvexb-backup.timer /etc/systemd/system/pvexb-backup.timer
 
 disable_systemd_units_for_ha_mode
 

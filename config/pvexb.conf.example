@@ -28,10 +28,11 @@ LOG_RETENTION_DAYS=180
 TELEGRAM_ENABLED=true
 TELEGRAM_SCRIPT="/usr/local/bin/pvexb-send-telegram"
 
-# v1 default: Home Assistant owns the smart plug and may also execute this script.
-# Future options:
-#   POWER_MODE="command" with POWER_ON_CMD/POWER_OFF_CMD
-#   POWER_MODE="homeassistant" when HA API control is implemented
+# --- USB Backup Mode (POWER_MODE=external) ---
+# Optional: Set USB_UUID if using pvexb-usb-launcher for automatic mount.
+# The launcher mounts /dev/disk/by-uuid/$USB_UUID to $MOUNT_POINT before backup.
+# Leave empty if Home Assistant mounts the drive externally.
+USB_UUID=""
 POWER_MODE="external"
 POWER_ON_CMD=""
 POWER_OFF_CMD=""

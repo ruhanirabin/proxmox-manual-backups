@@ -112,23 +112,36 @@ TELEGRAM_ENABLED=true
 
 ### Home Assistant Triggering
 
-**Recommended: mount + async backup (fire-and-forget):**
+**Recommended: systemd fire-and-forget (returns immediately, backup runs in background):**
+
+```yaml
+shell_command:
+  pvexb_backup: 'ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 root@192.168.71.1 "systemctl start --no-block pvexb-usb-backup.service"'
+```
+
+**Why systemd?** The HA `shell_command` service has a ~60-second timeout. Multi-VM backups take longer. The systemd `Type=oneshot` with `--no-block` pattern:
+- SSH returns immediately after systemd accepts the job
+- Backup runs as a proper systemd service with `journalctl` logging
+- `TimeoutStartSec=12h` handles long backups without HA timeout
+- PVEXB handles locking so concurrent runs are prevented
+- The smart plug power-off delay must be long enough to cover the full backup + unmount window
+
+**Legacy fallback: mount + async nohup (if systemd is unavailable):**
 
 ```yaml
 shell_command:
   pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'mount /dev/disk/by-uuid/<USB-UUID> /mnt/usb-backup && sleep 5 && nohup /usr/local/bin/pvexb-backup run > /dev/null 2>&1 &'"
 ```
 
-**Why async?** The HA `shell_command` service has a ~60-second timeout. Multi-VM backups take longer. The `nohup ... &` pattern:
+This pattern:
 - Mount is synchronous (returns only after mount succeeds)
 - Backup starts in the background and the SSH call returns immediately
 - HA does not timeout waiting for the backup to complete
-- PVEXB handles locking so concurrent runs are prevented
-- The smart plug power-off delay must be long enough to cover the full backup + unmount window
+- Logging is discarded; use `journalctl` on the Proxmox host for diagnostics
 
 Flow:
 1. HA turns on smart plug
-2. HA mounts the drive (synchronous)
+2. HA mounts the drive (synchronous, legacy only)
 3. HA fires backup in background, gets instant success response
 4. HA starts its power-off delay timer
 5. PVEXB waits for mount (already done), runs vzdump, unmounts, notifies via Telegram
@@ -139,19 +152,44 @@ Flow:
 ```yaml
 shell_command:
   pvexb_mount: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'mount /dev/disk/by-uuid/<USB-UUID> /mnt/usb-backup'"
-  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'nohup /usr/local/bin/pvexb-backup run > /dev/null 2>&1 &'"
+  pvexb_backup: 'ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 root@192.168.71.1 "systemctl start --no-block pvexb-usb-backup.service"'
 ```
 
 **Using systemd mount unit (with hyphen escaping):**
 
 ```yaml
 shell_command:
-  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.1 'systemctl start mnt-usb\\x2dbackup.mount && sleep 10 && nohup /usr/local/bin/pvexb-backup run > /dev/null 2>&1 &'"
+  pvexb_backup: 'ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 root@192.168.71.1 "systemctl start mnt-usb\\x2dbackup.mount && sleep 10 && systemctl start --no-block pvexb-usb-backup.service"'
 ```
 
 ---
 
 ## Setup: Network Backup
+
+### Home Assistant Triggering
+
+**Recommended: systemd fire-and-forget (returns immediately, backup runs in background):**
+
+```yaml
+shell_command:
+  pvexb_backup: 'ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 root@192.168.71.2 "systemctl start --no-block pvexb-backup.service"'
+```
+
+**Why systemd?** The HA `shell_command` service has a ~60-second timeout. Multi-VM backups take longer. The systemd `Type=oneshot` with `--no-block` pattern:
+- SSH returns immediately after systemd accepts the job
+- Backup runs as a proper systemd service with `journalctl` logging
+- `TimeoutStartSec=12h` handles long backups without HA timeout
+- PVEXB handles locking so concurrent runs are prevented
+- The NAS sleep schedule (if any) must allow enough time for the backup to complete
+
+**Legacy fallback: async nohup (if systemd is unavailable):**
+
+```yaml
+shell_command:
+  pvexb_backup: "ssh -i /config/ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.71.2 'nohup /usr/local/bin/pvexb-backup run > /dev/null 2>&1 &'"
+```
+
+This discards logs; use `journalctl` on the Proxmox host for diagnostics.
 
 ### How It Works
 

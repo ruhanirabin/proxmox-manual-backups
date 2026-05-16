@@ -2,6 +2,31 @@
 
 All notable changes follow Semantic Versioning.
 
+## [1.1.0] - 2026-05-16
+
+### Added
+- **systemd-first triggering for Home Assistant**: New `systemd/pvexb-backup.service`
+  with `TimeoutStartSec=12h` for long-running backups. HA should now use:
+  `systemctl start --no-block pvexb-backup.service` instead of `nohup ... &`.
+- **pvexb-usb-launcher**: New `bin/pvexb-usb-launcher` script for USB mode when HA
+  does not mount the drive externally. Mounts by UUID, runs backup, unmounts.
+- **pvexb-usb-backup.service**: New systemd service using the launcher for USB mode.
+- **install.sh** now installs all three systemd units to `/etc/systemd/system/` and
+  disables them by default (preserving HA-triggered mode). Set
+  `PVEXB_DISABLE_SYSTEMD=false` to keep timer scheduling enabled.
+- **USB_UUID** config variable: Set in `/etc/pvexb.conf` for automatic USB mount
+  when using `pvexb-usb-launcher`.
+
+### Changed
+- README now recommends systemd triggering as primary, with `nohup` documented as
+  legacy fallback.
+- `systemd/pvexb-backup.service` now includes `TimeoutStartSec=12h` and `KillMode=process`
+  for robust long-backup handling.
+
+### Deprecated
+- `nohup ... > /dev/null 2>&1 &` pattern in HA shell_command examples is now
+  documented as legacy fallback. New setups should use systemd.
+
 ## [1.0.3] - 2026-05-14
 
 ### Fixed

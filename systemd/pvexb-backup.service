@@ -1,8 +1,31 @@
+# PVEXB Proxmox Backup Service
+# Version: see /usr/local/share/pvexb/VERSION
+#
+# Description:
+# systemd oneshot service for running pvexb-backup.
+# Designed for Home Assistant triggering via:
+#   ssh root@node 'systemctl start --no-block pvexb-backup.service'
+#
+# Supports both POWER_MODE=external (USB) and POWER_MODE=network (NFS/NAS).
+# For USB mode where HA does not mount the drive externally,
+# use pvexb-usb-backup.service instead.
+#
+# Usage:
+#   systemctl start --no-block pvexb-backup.service   # HA trigger (fire-and-forget)
+#   systemctl start pvexb-backup.service              # Blocking (for timers/cron)
+#
+# Do NOT enable this service directly. Use pvexb-backup.timer for scheduling,
+# or trigger manually from Home Assistant.
+
 [Unit]
-Description=PVEXB Proxmox USB backup
+Description=PVEXB Proxmox Backup
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/pvexb-backup run
+TimeoutStartSec=12h
+KillMode=process
+StandardOutput=journal
+StandardError=journal

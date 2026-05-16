@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+#
+# PVEXB USB Backup Launcher
+# Version: read from ../VERSION in repo or /usr/local/share/pvexb/VERSION after install
+#
+# Description:
+# Mounts a USB backup drive by UUID, runs pvexb-backup, and handles cleanup.
+# Designed for systemd oneshot service integration where Home Assistant
+# triggers the backup but does not mount the drive externally.
+#
+# Usage:
+#   pvexb-usb-launcher run        # Mount USB, run backup, unmount
+#   pvexb-usb-launcher check      # Validate config, USB presence, mount
+#   pvexb-usb-launcher version    # Show version
+#
+# Configuration:
+#   Reads /etc/pvexb.conf for MOUNT_POINT, STORAGE_ID, and other settings.
+#   USB UUID is set below or override with PVEXB_USB_UUID env var.
+#
+# Dependencies:
+#   - bash, flock, mount, findmnt, umount
+#   - /usr/local/bin/pvexb-backup
+#   - /etc/pvexb.conf
+
+set -Eeuo pipefail
+
+APP_NAME="pvexb-usb-launcher"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+REPO_VERSION_FILE="$SCRIPT_DIR/../VERSION"
+INSTALLED_VERSION_FILE="/usr/local/share/pvexb/VERSION"
+
+read_version() {
+  if [ -f "$REPO_VERSION_FILE" ]; then
+    head -n 1 "$REPO_VERSION_FILE"
+  elif [ -f "$INSTALLED_VERSION_FILE" ]; then
+    head -n 1 "$INSTALLED_VERSION_FILE"
+  else
+    echo "0.0.0-unknown"
+  fi
+}
+
+VERSION="$(read_version)"
+
+# --- Config ---
+DEFAULT_CONFIG_FILE="/etc/pvexb.conf"
+LEGACY_CONFIG_FILE="/etc/proxmox-usb-backup.conf"
+CONFIG_FILE="${PVEXB_CONFIG:-${PROXMOX_USB_BACKUP_CONFIG:-$DEFAULT_CONFIG_FILE}}"
+
+# USB UUID: override with PVEXB_USB_UUID env var, or set in /etc/pvexb.conf
+# The config file can set USB_UUID="xxxx-xxxx"
+USB_UUID="${PVEXB_USB_UUID:-}"
+USB_DEVICE=""
+USB_MOUNT=""
+BACKUP_CMD="/usr/local/bin/pvexb-backup"
+
+# Logging
+LOG_DIR="/var/log/pvexb"
+LOG_FILE=""
+LOCK_FILE="/run/pvexb-usb-launcher.lock"
+
+ACTION="${1:-run}"
+
+usage() {
+  cat <<EOF
+$APP_NAME v$VERSION
+
+Usage:
+  $APP_NAME run         # Mount USB, run backup, unmount
+  $APP_NAME check       # Validate config and USB presence
+  $APP_NAME version     # Show version
+
+Environment:
+  PVEXB_CONFIG=/path/to/config
+  PVEXB_USB_UUID=xxxx-xxxx    # Override USB UUID
+
+Default config:
+  $DEFAULT_CONFIG_FILE
+EOF
+}
+
+timestamp() {
+  date '+%Y-%m-%d %H:%M:%S'
+}
+
+log() {
+  local line="[$(timestamp)] [$APP_NAME] $*"
+  echo "$line"
+  if [ -n "$LOG_FILE" ]; then
+    echo "$line" >> "$LOG_FILE" 2>/dev/null || true
+  fi
+}
+
+fail() {
+  log "ERROR" "$*"
+  exit 1
+}
+
+load_config() {
+  if [ "$CONFIG_FILE" = "$DEFAULT_CONFIG_FILE" ] && [ ! -f "$CONFIG_FILE" ] && [ -f "$LEGACY_CONFIG_FILE" ]; then
+    CONFIG_FILE="$LEGACY_CONFIG_FILE"
+  fi
+
+  if [ ! -f "$CONFIG_FILE" ]; then
+    fail "Config file not found: $CONFIG_FILE"
+  fi
+
+  # shellcheck disable=SC1090
+  if ! source "$CONFIG_FILE"; then
+    fail "Failed to load config file: $CONFIG_FILE"
+  fi
+
+  # Resolve USB UUID from config or env
+  if [ -z "$USB_UUID" ] && [ -n "${USB_UUID:-}" ]; then
+    : # already set from env
+  elif [ -z "$USB_UUID" ] && declare -p USB_UUID >/dev/null 2>&1; then
+    # shellcheck disable=SC2154
+    USB_UUID="$USB_UUID"
+  fi
+
+  USB_MOUNT="${MOUNT_POINT:-/mnt/usb-backup}"
+  LOG_DIR="${LOG_DIR:-/var/log/pvexb}"
+  LOG_FILE="${LOG_DIR}/${APP_NAME}-$(date +%F).log"
+
+  if [ -n "$USB_UUID" ]; then
+    USB_DEVICE="/dev/disk/by-uuid/$USB_UUID"
+  fi
+}
+
+cleanup_logs() {
+  find "$LOG_DIR" -type f -name "${APP_NAME}-*.log" -mtime +7 -delete 2>/dev/null || true
+}
+
+acquire_lock() {
+  local lock_dir
+  lock_dir="$(dirname "$LOCK_FILE")"
+  if [ ! -d "$lock_dir" ]; then
+    mkdir -p "$lock_dir" 2>/dev/null || true
+  fi
+
+  if ! exec 9>"$LOCK_FILE"; then
+    fail "Unable to open lock file: $LOCK_FILE"
+  fi
+
+  if ! flock -n 9; then
+    log "Another $APP_NAME job is already running. Exiting."
+    exit 0
+  fi
+}
+
+wait_for_mount() {
+  local waited=0
+  local max_wait="${WAIT_SECONDS:-600}"
+  local interval="${WAIT_INTERVAL:-5}"
+
+  while [ "$waited" -le "$max_wait" ]; do
+    if findmnt -rn "$USB_MOUNT" >/dev/null 2>&1; then
+      log "USB mount active at $USB_MOUNT"
+      return 0
+    fi
+    log "Waiting for USB mount at $USB_MOUNT... (${waited}s/${max_wait}s)"
+    sleep "$interval"
+    waited=$((waited + interval))
+  done
+
+  fail "USB mount not available after ${max_wait}s: $USB_MOUNT"
+}
+
+mount_usb() {
+  if [ -z "$USB_DEVICE" ]; then
+    fail "USB_UUID not configured. Set PVEXB_USB_UUID or USB_UUID in $CONFIG_FILE"
+  fi
+
+  if [ ! -e "$USB_DEVICE" ]; then
+    fail "USB device not found: $USB_DEVICE"
+  fi
+
+  if findmnt -rn "$USB_MOUNT" >/dev/null 2>&1; then
+    log "USB already mounted at $USB_MOUNT"
+    return 0
+  fi
+
+  mkdir -p "$USB_MOUNT"
+  log "Mounting $USB_DEVICE to $USB_MOUNT"
+  mount "$USB_DEVICE" "$USB_MOUNT"
+
+  sleep 2
+
+  if ! findmnt -rn "$USB_MOUNT" >/dev/null 2>&1; then
+    fail "Mount verification failed for $USB_MOUNT"
+  fi
+
+  log "USB mounted successfully"
+}
+
+unmount_usb() {
+  if ! findmnt -rn "$USB_MOUNT" >/dev/null 2>&1; then
+    log "USB not mounted; nothing to unmount"
+    return 0
+  fi
+
+  log "Unmounting $USB_MOUNT"
+  umount "$USB_MOUNT" || {
+    log "WARN: umount failed, trying lazy unmount"
+    umount -l "$USB_MOUNT" || true
+  }
+}
+
+run_backup() {
+  load_config
+  cleanup_logs
+  acquire_lock
+
+  log "Starting $APP_NAME v$VERSION"
+
+  mount_usb
+
+  if [ ! -x "$BACKUP_CMD" ]; then
+    unmount_usb || true
+    fail "Backup command not found or not executable: $BACKUP_CMD"
+  fi
+
+  log "Running: $BACKUP_CMD run"
+  "$BACKUP_CMD" run || {
+    local rc=$?
+    log "Backup failed with exit code $rc"
+    unmount_usb || true
+    exit "$rc"
+  }
+
+  unmount_usb
+  log "Backup completed successfully"
+}
+
+check_only() {
+  load_config
+
+  if [ -n "$USB_DEVICE" ] && [ ! -e "$USB_DEVICE" ]; then
+    fail "USB device not found: $USB_DEVICE"
+  fi
+
+  if [ ! -x "$BACKUP_CMD" ]; then
+    fail "Backup command not found: $BACKUP_CMD"
+  fi
+
+  log "Config OK. USB: ${USB_DEVICE:-not configured}. Mount: $USB_MOUNT. Backup cmd: $BACKUP_CMD"
+}
+
+case "$ACTION" in
+  run)
+    run_backup
+    ;;
+  check)
+    check_only
+    ;;
+  version)
+    echo "$APP_NAME v$VERSION"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

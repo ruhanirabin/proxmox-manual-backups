@@ -1,0 +1,29 @@
+# PVEXB Proxmox USB Backup Service
+# Version: see /usr/local/share/pvexb/VERSION
+#
+# Description:
+# systemd oneshot service for USB backup mode when Home Assistant
+# does NOT mount the USB drive externally. This service uses a launcher
+# script that mounts the USB drive by UUID, runs pvexb-backup, then
+# handles cleanup.
+#
+# For setups where HA already mounts the USB drive (external power mode),
+# use pvexb-backup.service instead.
+#
+# Usage:
+#   systemctl start --no-block pvexb-usb-backup.service   # HA trigger
+#
+# Do NOT enable this service directly. Trigger from HA or cron.
+
+[Unit]
+Description=PVEXB Proxmox USB Backup (with mount)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pvexb-usb-launcher run
+TimeoutStartSec=12h
+KillMode=process
+StandardOutput=journal
+StandardError=journal
